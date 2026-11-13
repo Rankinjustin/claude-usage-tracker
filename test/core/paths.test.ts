@@ -1,12 +1,13 @@
 import { mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { dataHome, dbPath, ensureDataHome, projectsRoot, stateFile } from '../../src/core/paths';
 
 const saved = { ...process.env };
 afterEach(() => {
-  process.env = { ...saved };
+  for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+  Object.assign(process.env, saved);
 });
 
 describe('paths', () => {
@@ -24,8 +25,9 @@ describe('paths', () => {
     delete process.env.TOKEN_TRACKER_HOME;
     delete process.env.CLAUDE_CONFIG_DIR;
     const home = 'C:\Users\Jane Doe';
-    expect(dataHome(home)).toBe(join(home, '.claude', 'token-tracker'));
-    expect(projectsRoot(home)).toBe(join(home, '.claude', 'projects'));
+    const j = process.platform === 'win32' ? win32.join : join;
+    expect(dataHome(home)).toBe(j(home, '.claude', 'token-tracker'));
+    expect(projectsRoot(home)).toBe(j(home, '.claude', 'projects'));
   });
 
   it('projectsRoot honours CLAUDE_CONFIG_DIR', () => {
