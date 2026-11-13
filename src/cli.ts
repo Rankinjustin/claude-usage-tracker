@@ -165,6 +165,15 @@ async function run(sub: string): Promise<void> {
       if (!ran) console.log('another indexer is running; skipped');
       return;
     }
+    case 'serve': {
+      const { startServer } = await import('./server/server');
+      await new Promise<void>((done) => {
+        startServer({ onClosed: done }).then((s) => {
+          console.log(`Token Tracker serving on ${s.url}`);
+        }, (e) => { log(`serve failed: ${errText(e)}`); done(); });
+      });
+      return;
+    }
     default:
       console.error(`token-tracker: unknown command "${sub}"`);
   }

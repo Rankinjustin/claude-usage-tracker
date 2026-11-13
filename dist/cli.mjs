@@ -8,9 +8,9 @@ var __esm = (fn, res, err) => function __init() {
     throw err = [e], e;
   }
 };
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
+var __export = (target, all2) => {
+  for (var name in all2)
+    __defProp(target, name, { get: all2[name], enumerable: true });
 };
 
 // src/core/paths.ts
@@ -49,6 +49,94 @@ function ensureDataHome() {
 var init_paths = __esm({
   "src/core/paths.ts"() {
     "use strict";
+  }
+});
+
+// src/ingest/lock.ts
+import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { join as join2 } from "node:path";
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function staleContent(path) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const { pid, ts } = JSON.parse(text);
+    if (typeof pid !== "number") return text;
+    return !pidAlive(pid) || typeof ts !== "number" || !(Date.now() - ts < STALE_MS) ? text : null;
+  } catch {
+    try {
+      return Date.now() - statSync(path).mtimeMs > CORRUPT_GRACE_MS ? text : null;
+    } catch {
+      return null;
+    }
+  }
+}
+function takeOver(path) {
+  const seen = staleContent(path);
+  if (seen === null) return false;
+  try {
+    if (readFileSync(path, "utf8") !== seen) return false;
+    unlinkSync(path);
+  } catch {
+  }
+  return true;
+}
+function tryAcquire(path) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(path, "wx", 384);
+      try {
+        writeSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+      } finally {
+        closeSync(fd);
+      }
+      return true;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (!takeOver(path)) return false;
+    }
+  }
+  return false;
+}
+function withWriteLock(fn, opts = {}) {
+  ensureDataHome();
+  const path = join2(dataHome(), "write.lock");
+  const deadline = Date.now() + (opts.waitMs ?? 0);
+  while (!tryAcquire(path)) {
+    if (Date.now() >= deadline) return "busy";
+    sleep(50);
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      unlinkSync(path);
+    } catch {
+    }
+  }
+}
+var STALE_MS, sleep, CORRUPT_GRACE_MS;
+var init_lock = __esm({
+  "src/ingest/lock.ts"() {
+    "use strict";
+    init_paths();
+    STALE_MS = 10 * 60 * 1e3;
+    sleep = (ms) => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    };
+    CORRUPT_GRACE_MS = 3e4;
   }
 });
 
@@ -897,95 +985,796 @@ var init_indexer = __esm({
   }
 });
 
-// src/cli.ts
-init_paths();
-import { spawn } from "node:child_process";
-import { appendFileSync, existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+// src/query/ranges.ts
+function dayStart(d, offset = 0) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + offset);
+}
+function parseBound(s) {
+  const m2 = /^(\d{4})-(\d\d)-(\d\d)$/.exec(s);
+  return m2 ? new Date(Number(m2[1]), Number(m2[2]) - 1, Number(m2[3])) : new Date(s);
+}
+function resolveRange(r, now = /* @__PURE__ */ new Date()) {
+  const iso = (d) => d.toISOString();
+  if ("preset" in r) {
+    const days = { today: 1, week: 7, month: 30, all: 0 }[r.preset];
+    const to2 = dayStart(now, 1);
+    if (days === 0) {
+      const from3 = "1970-01-01T00:00:00.000Z";
+      return { from: from3, to: iso(to2), prevFrom: from3, prevTo: from3 };
+    }
+    const from2 = dayStart(now, 1 - days);
+    return { from: iso(from2), to: iso(to2), prevFrom: iso(dayStart(now, 1 - 2 * days)), prevTo: iso(from2) };
+  }
+  const from = parseBound(r.from);
+  const to = parseBound(r.to);
+  const prevFrom = new Date(from.getTime() - (to.getTime() - from.getTime()));
+  return { from: iso(from), to: iso(to), prevFrom: iso(prevFrom), prevTo: iso(from) };
+}
+var init_ranges = __esm({
+  "src/query/ranges.ts"() {
+    "use strict";
+  }
+});
 
-// src/ingest/lock.ts
-init_paths();
-import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { join as join2 } from "node:path";
-var STALE_MS = 10 * 60 * 1e3;
-var sleep = (ms) => {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-};
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+// src/query/views.ts
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
+function all(db, sql, ...p) {
+  return db.raw.prepare(sql).all(...p);
+}
+function median(xs) {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const m2 = s.length >> 1;
+  return s.length % 2 ? s[m2] : (s[m2 - 1] + s[m2]) / 2;
+}
+function cacheHit(read, w5, w1, input) {
+  return pct(read, read + w5 + w1 + input);
+}
+function localDay(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function agentKind(type) {
+  return type === "main" ? "main" : BUILT_IN.has(type) ? "built-in" : "custom";
+}
+function parseParts(json) {
+  if (!json) return {};
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === "EPERM";
+    return JSON.parse(json);
+  } catch {
+    return {};
   }
 }
-var CORRUPT_GRACE_MS = 3e4;
-function staleContent(path) {
-  let text;
+function advisorTokens(json) {
   try {
-    text = readFileSync(path, "utf8");
+    return JSON.parse(json);
+  } catch {
+    return {};
+  }
+}
+function takeaway(parts, total, calls, storeHasCalls) {
+  if (calls === 0) return storeHasCalls ? "No usage in this period." : "No usage recorded yet.";
+  if (total <= 0) return "No priced usage in this range.";
+  const groups = [
+    ["Cache reads and writes", parts.cacheRead + parts.cacheWrite5m + parts.cacheWrite1h],
+    ["Output and thinking", parts.output + parts.thinking],
+    ["Advisor calls", parts.advisor],
+    ["Input tokens", parts.input]
+  ];
+  groups.sort((a, b) => b[1] - a[1]);
+  return `${groups[0][0]} were ${Math.round(pct(groups[0][1], total))}% of spend.`;
+}
+function overview(db, r, now) {
+  const rg = resolveRange(r, now);
+  const rows = all(db, `${WITH_CALLS} SELECT ts, session_id, is_main, ctx_tokens, input, cache_write_5m, cache_write_1h,
+    cache_read, output, thinking, cost, cost_parts_json FROM calls WHERE ts >= ? AND ts < ?`, rg.from, rg.to);
+  const tok = {
+    input: 0,
+    cacheWrite5m: 0,
+    cacheWrite1h: 0,
+    cacheRead: 0,
+    output: 0,
+    thinking: 0,
+    advisor: 0
+  };
+  const cost = { ...tok };
+  const daily = /* @__PURE__ */ new Map();
+  const heat = /* @__PURE__ */ new Map();
+  const sessionIds = /* @__PURE__ */ new Set();
+  let total = 0, agentCost = 0, unpricedCalls = 0, mainCtx = 0, mainCalls = 0;
+  const day = (ts) => {
+    const k = localDay(ts);
+    let d = daily.get(k);
+    if (!d) daily.set(k, d = { cost: 0, parts: {} });
+    return d;
+  };
+  for (const row2 of rows) {
+    sessionIds.add(row2.session_id);
+    for (const k of PART_KEYS) tok[k] += row2[COL[k]];
+    if (row2.is_main) {
+      mainCtx += row2.ctx_tokens;
+      mainCalls++;
+    }
+    if (row2.cost === null) {
+      unpricedCalls++;
+      continue;
+    }
+    total += row2.cost;
+    if (!row2.is_main) agentCost += row2.cost;
+    const d = day(row2.ts);
+    d.cost += row2.cost;
+    const parts = parseParts(row2.cost_parts_json);
+    for (const k of PART_KEYS) {
+      const v = parts[k] ?? 0;
+      cost[k] += v;
+      d.parts[k] = (d.parts[k] ?? 0) + v;
+    }
+    const dt = new Date(row2.ts);
+    const hk = `${dt.getDay()}:${dt.getHours()}`;
+    heat.set(hk, (heat.get(hk) ?? 0) + row2.cost);
+  }
+  const adv = all(db, `${WITH_CALLS} SELECT a.tokens_json, a.cost, k.ts, k.is_main FROM advisor_calls a
+    JOIN calls k ON k.message_id = a.message_id WHERE k.ts >= ? AND k.ts < ?`, rg.from, rg.to);
+  for (const a of adv) {
+    tok.advisor += sumTokens(advisorTokens(a.tokens_json));
+    if (a.cost === null) continue;
+    cost.advisor += a.cost;
+    total += a.cost;
+    if (!a.is_main) agentCost += a.cost;
+    const d = day(a.ts);
+    d.cost += a.cost;
+    d.parts.advisor = (d.parts.advisor ?? 0) + a.cost;
+    const dt = new Date(a.ts);
+    const hk = `${dt.getDay()}:${dt.getHours()}`;
+    heat.set(hk, (heat.get(hk) ?? 0) + a.cost);
+  }
+  const prev = all(
+    db,
+    `${WITH_CALLS} SELECT COALESCE(SUM(${CALL_COST}), 0) AS c FROM calls WHERE ts >= ? AND ts < ?`,
+    rg.prevFrom,
+    rg.prevTo
+  )[0].c;
+  const prompts2 = all(db, "SELECT COUNT(*) AS n FROM prompts WHERE ts >= ? AND ts < ?", rg.from, rg.to)[0].n;
+  const keys = [...PART_KEYS, "advisor"];
+  return {
+    total,
+    prevTotal: prev,
+    tokens: sumTokens(tok),
+    calls: rows.length,
+    unpricedCalls,
+    sessions: sessionIds.size,
+    prompts: prompts2,
+    cacheHitPct: cacheHit(tok.cacheRead, tok.cacheWrite5m, tok.cacheWrite1h, tok.input),
+    parts: keys.map((key) => ({ key, tokens: tok[key], cost: cost[key], pct: pct(cost[key], total) })),
+    daily: [...daily.entries()].sort(([a], [b]) => a < b ? -1 : 1).map(([d, v]) => ({ day: d, ...v })),
+    heat: [...heat.entries()].map(([k, c]) => {
+      const [weekday, hour] = k.split(":").map(Number);
+      return { weekday, hour, cost: c };
+    }),
+    subagentPct: pct(agentCost, total),
+    mainAvgCtx: mainCalls ? Math.round(mainCtx / mainCalls) : 0,
+    takeaway: takeaway(
+      cost,
+      total,
+      rows.length,
+      rows.length > 0 || all(db, "SELECT 1 FROM api_calls LIMIT 1").length > 0
+    )
+  };
+}
+function allRuns(db, activeSince) {
+  const scope = activeSince ? `WHERE r.agent_type IN (SELECT r2.agent_type FROM runs r2 JOIN api_calls c2 ON c2.run_id = r2.id
+        WHERE c2.ts >= ? AND r2.agent_type <> 'main')` : "";
+  const rows = all(db, `${WITH_CALLS}
+    SELECT r.id, r.agent_type, r.description, r.session_id, MIN(k.ts) AS start, MAX(k.ts) AS last_call,
+      (SELECT MAX(t.ended_ts) FROM tool_calls t WHERE t.run_id = r.id) AS last_tool,
+      (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id = r.id) AS tool_n,
+      (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id = r.id AND t.is_error = 1) AS tool_err,
+      SUM(${CALL_COST}) AS cost, COUNT(k.message_id) AS calls, SUM(k.ctx_tokens) AS ctx_sum,
+      rpf.prompt_uuid AS prompt_uuid, p.text AS prompt_text
+    FROM runs r JOIN calls k ON k.run_id = r.id LEFT JOIN rpf ON rpf.run_id = r.id
+      LEFT JOIN prompts p ON p.uuid = rpf.prompt_uuid
+    ${scope}
+    GROUP BY r.id ORDER BY start, r.id`, ...activeSince ? [activeSince] : []);
+  const prior = /* @__PURE__ */ new Map();
+  return rows.map((x) => {
+    let flagged = false;
+    if (x.agent_type !== "main") {
+      const costs = prior.get(x.agent_type) ?? [];
+      flagged = costs.length >= FLAG_MIN_PRIOR && x.cost > FLAG_MULTIPLE * median(costs);
+      costs.push(x.cost);
+      prior.set(x.agent_type, costs);
+    }
+    const end = [x.last_call, x.last_tool].filter(Boolean).sort().pop();
+    return {
+      id: x.id,
+      agentType: x.agent_type,
+      description: x.description,
+      start: x.start,
+      durationMs: Math.max(0, Date.parse(end) - Date.parse(x.start)),
+      cost: x.cost,
+      calls: x.calls,
+      promptUuid: x.prompt_uuid,
+      promptText: x.prompt_text,
+      flagged,
+      sessionId: x.session_id,
+      ctxSum: x.ctx_sum,
+      toolCalls: x.tool_n,
+      toolErrors: x.tool_err
+    };
+  });
+}
+function sessionRows(db, from, to, id) {
+  const idSql = id ? "AND s.id = ?" : "";
+  const params = id ? [from, to, id] : [from, to];
+  const rows = all(db, `${WITH_CALLS}
+    SELECT s.id, s.title, s.project, s.first_ts, s.last_ts, SUM(${CALL_COST}) AS cost,
+      SUM(CASE WHEN k.is_main THEN 0 ELSE ${CALL_COST} END) AS agent_cost, COUNT(*) AS calls,
+      MAX(CASE WHEN k.is_main THEN k.ctx_tokens ELSE 0 END) AS peak,
+      GROUP_CONCAT(DISTINCT k.model) AS models
+    FROM sessions s JOIN calls k ON k.session_id = s.id WHERE k.ts >= ? AND k.ts < ? ${idSql}
+    GROUP BY s.id ORDER BY s.first_ts DESC`, ...params);
+  const startCtx = /* @__PURE__ */ new Map();
+  const ids = rows.map((s) => s.id);
+  const firstCalls = ids.length === 0 ? [] : all(db, `${WITH_CALLS} SELECT session_id, ctx_tokens FROM calls
+    WHERE is_main AND session_id IN (${ids.map(() => "?").join(",")}) ORDER BY ts`, ...ids);
+  for (const c of firstCalls) {
+    if (!startCtx.has(c.session_id)) startCtx.set(c.session_id, c.ctx_tokens);
+  }
+  const compactions = /* @__PURE__ */ new Map();
+  for (const c of all(db, `SELECT session_id, COUNT(*) AS n FROM compactions WHERE ts >= ? AND ts < ?
+    GROUP BY session_id`, from, to)) compactions.set(c.session_id, c.n);
+  return rows.map((s) => ({
+    id: s.id,
+    title: s.title,
+    project: s.project,
+    start: s.first_ts,
+    durationMin: Math.round((Date.parse(s.last_ts) - Date.parse(s.first_ts)) / 6e4),
+    calls: s.calls,
+    cost: s.cost,
+    agentCost: s.agent_cost,
+    peakCtx: s.peak,
+    startCtx: startCtx.get(s.id) ?? 0,
+    compactions: compactions.get(s.id) ?? 0,
+    models: String(s.models ?? "").split(",").filter(Boolean).sort()
+  }));
+}
+function sessions(db, r, now) {
+  const rg = resolveRange(r, now);
+  return sessionRows(db, rg.from, rg.to);
+}
+function sessionDetail(db, id) {
+  const session = sessionRows(db, "", "\uFFFF", id)[0] ?? null;
+  const ps = promptRows(db, all(db, "SELECT * FROM prompts WHERE session_id = ? ORDER BY ts", id));
+  const runs = allRuns(db).filter((x) => x.sessionId === id).map(toRunRow);
+  const ctxSeries = all(db, `${WITH_CALLS} SELECT ts, ctx_tokens AS ctx FROM calls WHERE is_main AND session_id = ?
+    ORDER BY ts`, id).map((c) => ({ ts: c.ts, ctx: c.ctx }));
+  return { session, prompts: ps, runs, ctxSeries };
+}
+function promptTotals(db) {
+  const m2 = /* @__PURE__ */ new Map();
+  for (const x of all(db, `${WITH_CALLS} SELECT eff_prompt AS u,
+      SUM(CASE WHEN is_main THEN ${CALL_COST} ELSE 0 END) AS main,
+      SUM(CASE WHEN is_main THEN 0 ELSE ${CALL_COST} END) AS agent, COUNT(*) AS calls
+    FROM calls WHERE eff_prompt IS NOT NULL GROUP BY eff_prompt`)) {
+    m2.set(x.u, { main: x.main, agent: x.agent, calls: x.calls });
+  }
+  return m2;
+}
+function promptRows(db, rows, base = rows) {
+  const totals = promptTotals(db);
+  const t = (u) => {
+    const x = totals.get(u);
+    return x ? x.main + x.agent : 0;
+  };
+  const med = median(base.map((p) => t(p.uuid)).filter((v) => v > 0));
+  const titles = new Map(all(db, "SELECT id, title FROM sessions").map((s) => [s.id, s.title]));
+  return rows.map((p) => {
+    const x = totals.get(p.uuid) ?? { main: 0, agent: 0, calls: 0 };
+    const total = x.main + x.agent;
+    return {
+      uuid: p.uuid,
+      sessionId: p.session_id,
+      sessionTitle: titles.get(p.session_id) ?? null,
+      ts: p.ts,
+      text: p.text,
+      cost: x.main,
+      agentCost: x.agent,
+      total,
+      calls: x.calls,
+      durationMs: p.duration_ms,
+      multipleOfMedian: med > 0 ? total / med : null
+    };
+  });
+}
+function prompts(db, r, q, now) {
+  const rg = resolveRange(r, now);
+  const inRange = all(db, "SELECT * FROM prompts WHERE ts >= ? AND ts < ? ORDER BY ts DESC", rg.from, rg.to);
+  const needle = q?.trim().toLowerCase();
+  const shown = needle ? inRange.filter((p) => String(p.text).toLowerCase().includes(needle)) : inRange;
+  return promptRows(db, shown, inRange);
+}
+function promptDetail(db, uuid) {
+  const p = all(db, "SELECT * FROM prompts WHERE uuid = ?", uuid)[0];
+  if (!p) return null;
+  const prompt = promptRows(db, [p], all(db, "SELECT * FROM prompts"))[0];
+  const calls = all(db, `${WITH_CALLS} SELECT run_id, agent_type, is_main, input, cache_write_5m, cache_write_1h,
+    cache_read, output, thinking, cost, cost_parts_json, adv FROM calls WHERE eff_prompt = ?`, uuid);
+  const tok = {
+    input: 0,
+    cacheWrite5m: 0,
+    cacheWrite1h: 0,
+    cacheRead: 0,
+    output: 0,
+    thinking: 0,
+    advisor: 0
+  };
+  const cost = { ...tok };
+  const byLabel = /* @__PURE__ */ new Map();
+  const byRun = /* @__PURE__ */ new Map();
+  for (const c of calls) {
+    for (const k of PART_KEYS) tok[k] += c[COL[k]];
+    const parts = parseParts(c.cost_parts_json);
+    for (const k of PART_KEYS) cost[k] += parts[k] ?? 0;
+    const callCost = (c.cost ?? 0) + c.adv;
+    const label = c.is_main ? "Main thread" : c.agent_type;
+    byLabel.set(label, (byLabel.get(label) ?? 0) + callCost);
+    const br = byRun.get(c.run_id) ?? { cost: 0, calls: 0 };
+    br.cost += callCost;
+    br.calls++;
+    byRun.set(c.run_id, br);
+  }
+  for (const a of all(db, `${WITH_CALLS} SELECT a.tokens_json, a.cost FROM advisor_calls a
+    JOIN calls k ON k.message_id = a.message_id WHERE k.eff_prompt = ?`, uuid)) {
+    tok.advisor += sumTokens(advisorTokens(a.tokens_json));
+    cost.advisor += a.cost ?? 0;
+  }
+  const tools = all(db, `${WITH_CALLS} SELECT t.label, COUNT(*) AS calls, SUM(t.is_error) AS failed, SUM(t.denied) AS denied
+    FROM tool_calls t LEFT JOIN rpf ON rpf.run_id = t.run_id WHERE COALESCE(t.prompt_uuid, rpf.prompt_uuid) = ?
+    GROUP BY t.label ORDER BY calls DESC, t.label`, uuid);
+  const advisorCalls = all(db, `${WITH_CALLS} SELECT COUNT(*) AS n FROM advisor_calls a
+    JOIN calls k ON k.message_id = a.message_id WHERE k.eff_prompt = ?`, uuid)[0].n;
+  const runs = allRuns(db).filter((x) => byRun.has(x.id)).map((x) => ({
+    ...toRunRow(x),
+    cost: byRun.get(x.id).cost,
+    calls: byRun.get(x.id).calls,
+    promptUuid: uuid,
+    promptText: p.text
+  }));
+  const keys = [...PART_KEYS, "advisor"];
+  return {
+    prompt,
+    summary: {
+      cost: prompt.cost,
+      agentCost: prompt.agentCost,
+      durationMs: prompt.durationMs,
+      tokens: sumTokens(tok),
+      cacheReadPct: cacheHit(tok.cacheRead, tok.cacheWrite5m, tok.cacheWrite1h, tok.input),
+      apiCalls: calls.length,
+      advisorCalls,
+      toolCalls: tools.reduce((a, t) => a + t.calls, 0),
+      failed: tools.reduce((a, t) => a + (t.failed ?? 0), 0),
+      denied: tools.reduce((a, t) => a + (t.denied ?? 0), 0)
+    },
+    parts: keys.map((key) => ({ key, tokens: tok[key], cost: cost[key] })),
+    byPart: [...byLabel.entries()].map(([label, c]) => ({ label, cost: c })).sort((a, b) => b.cost - a.cost),
+    runs,
+    tools: tools.map((t) => ({ label: t.label, calls: t.calls, failed: t.failed ?? 0 }))
+  };
+}
+function agents(db, r, now) {
+  const rg = resolveRange(r, now);
+  const agg = all(
+    db,
+    `${WITH_CALLS} SELECT agent_type, COUNT(DISTINCT run_id) AS runs, COUNT(*) AS calls,
+      SUM(${CALL_COST}) AS cost, SUM(ctx_tokens) AS ctx_sum FROM calls WHERE ts >= ? AND ts < ? GROUP BY agent_type`,
+    rg.from,
+    rg.to
+  );
+  const started = allRuns(db).filter((x) => x.start >= rg.from && x.start < rg.to);
+  const grandTotal = agg.reduce((a, x) => a + x.cost, 0);
+  return agg.map((x) => {
+    const xs = started.filter((run2) => run2.agentType === x.agent_type);
+    const toolN = xs.reduce((a, run2) => a + run2.toolCalls, 0);
+    return {
+      type: x.agent_type,
+      kind: agentKind(x.agent_type),
+      runs: x.runs,
+      calls: x.calls,
+      cost: x.cost,
+      pct: pct(x.cost, grandTotal),
+      perRun: x.cost / x.runs,
+      avgCtx: Math.round(x.ctx_sum / x.calls),
+      avgDurationMs: xs.length ? xs.reduce((a, run2) => a + run2.durationMs, 0) / xs.length : 0,
+      errorRate: pct(xs.reduce((a, run2) => a + run2.toolErrors, 0), toolN),
+      sparkline: xs.slice(-SPARK_RUNS).map((run2) => run2.cost),
+      flaggedRuns: xs.filter((run2) => run2.flagged).length
+    };
+  }).sort((a, b) => b.cost - a.cost);
+}
+function agentDetail(db, type, r, now) {
+  const rg = resolveRange(r, now);
+  const runs = allRuns(db).filter((x) => x.agentType === type && x.start >= rg.from && x.start < rg.to);
+  return {
+    stats: agents(db, r, now).find((a) => a.type === type) ?? null,
+    runs: runs.map(toRunRow),
+    medianCost: median(runs.map((x) => x.cost))
+  };
+}
+function installedAt() {
+  try {
+    const f = stateFile("installed.json");
+    if (!existsSync4(f)) return null;
+    const v = JSON.parse(readFileSync3(f, "utf8")).installedAt;
+    return typeof v === "string" ? v : null;
   } catch {
     return null;
   }
-  try {
-    const { pid, ts } = JSON.parse(text);
-    if (typeof pid !== "number") return text;
-    return !pidAlive(pid) || typeof ts !== "number" || !(Date.now() - ts < STALE_MS) ? text : null;
-  } catch {
-    try {
-      return Date.now() - statSync(path).mtimeMs > CORRUPT_GRACE_MS ? text : null;
-    } catch {
-      return null;
-    }
-  }
 }
-function takeOver(path) {
-  const seen = staleContent(path);
-  if (seen === null) return false;
+function coverage(db) {
+  const n = (sql) => all(db, sql)[0].n;
+  const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE missing = 1 AND session_id IS NOT NULL`);
+  let progress = null;
   try {
-    if (readFileSync(path, "utf8") !== seen) return false;
-    unlinkSync(path);
+    progress = JSON.parse(db.meta.get("backfill_progress") ?? "null");
   } catch {
   }
-  return true;
+  const started = progress?.startedAt ?? null;
+  return {
+    installedAt: installedAt() ?? started,
+    sessionsComplete: n("SELECT COUNT(*) AS n FROM sessions") - sessionsPartial,
+    sessionsPartial,
+    filesMissingBeforeIndexed: n("SELECT COUNT(*) AS n FROM files WHERE missing = 1"),
+    backfillProgress: progress
+  };
 }
-function tryAcquire(path) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(path, "wx", 384);
-      try {
-        writeSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
-      } finally {
-        closeSync(fd);
-      }
-      return true;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      if (!takeOver(path)) return false;
-    }
+var PART_KEYS, COL, BUILT_IN, FLAG_MULTIPLE, FLAG_MIN_PRIOR, SPARK_RUNS, WITH_CALLS, CALL_COST, pct, sumTokens, toRunRow;
+var init_views = __esm({
+  "src/query/views.ts"() {
+    "use strict";
+    init_paths();
+    init_ranges();
+    PART_KEYS = ["input", "cacheWrite5m", "cacheWrite1h", "cacheRead", "output", "thinking"];
+    COL = {
+      input: "input",
+      cacheWrite5m: "cache_write_5m",
+      cacheWrite1h: "cache_write_1h",
+      cacheRead: "cache_read",
+      output: "output",
+      thinking: "thinking"
+    };
+    BUILT_IN = /* @__PURE__ */ new Set(["general-purpose", "Explore", "Plan", "statusline-setup", "claude-code-guide", "fork"]);
+    FLAG_MULTIPLE = 3;
+    FLAG_MIN_PRIOR = 5;
+    SPARK_RUNS = 20;
+    WITH_CALLS = `WITH RECURSIVE
+rp(run_id, prompt_uuid, nxt, depth) AS (
+  SELECT r.id, t.prompt_uuid, t.run_id, 0 FROM runs r JOIN tool_calls t ON t.tool_use_id = r.launch_tool_use_id
+  UNION ALL
+  SELECT rp.run_id, t2.prompt_uuid, t2.run_id, rp.depth + 1
+  FROM rp JOIN runs pr ON pr.id = rp.nxt JOIN tool_calls t2 ON t2.tool_use_id = pr.launch_tool_use_id
+  WHERE rp.prompt_uuid IS NULL AND rp.depth < 8
+),
+rpf AS (SELECT run_id, prompt_uuid FROM rp WHERE prompt_uuid IS NOT NULL),
+calls AS (
+  SELECT c.message_id, c.session_id, c.run_id, c.ts, c.model, c.ctx_tokens, c.input, c.cache_write_5m,
+    c.cache_write_1h, c.cache_read, c.output, c.thinking, c.cost, c.cost_parts_json,
+    COALESCE((SELECT SUM(a.cost) FROM advisor_calls a WHERE a.message_id = c.message_id), 0) AS adv,
+    COALESCE(c.prompt_uuid, rpf.prompt_uuid) AS eff_prompt,
+    (r.agent_type IS NULL OR r.agent_type = 'main') AS is_main,
+    COALESCE(r.agent_type, 'main') AS agent_type
+  FROM api_calls c LEFT JOIN runs r ON r.id = c.run_id LEFT JOIN rpf ON rpf.run_id = c.run_id
+)`;
+    CALL_COST = "(COALESCE(cost, 0) + adv)";
+    pct = (part, whole) => whole > 0 ? part / whole * 100 : 0;
+    sumTokens = (t) => Object.values(t).reduce((a, b) => a + b, 0);
+    toRunRow = ({ sessionId, ctxSum, toolCalls, toolErrors, ...run2 }) => run2;
   }
-  return false;
+});
+
+// src/server/server.ts
+var server_exports = {};
+__export(server_exports, {
+  startServer: () => startServer
+});
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync as existsSync5, readFileSync as readFileSync4, realpathSync, rmSync, statSync as statSync3, watch, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { extname, resolve as resolve2, sep as sep2 } from "node:path";
+import { fileURLToPath } from "node:url";
+function parseRange(param) {
+  const v = param ?? "week";
+  if (PRESETS.includes(v)) return { preset: v };
+  const parts = v.split(",");
+  const ok = (s) => /^\d{4}-\d\d-\d\d/.test(s) && !Number.isNaN(Date.parse(s));
+  if (parts.length === 2 && ok(parts[0]) && ok(parts[1])) return { from: parts[0], to: parts[1] };
+  throw new HttpError(400, "invalid range");
 }
-function withWriteLock(fn, opts = {}) {
+function sameKey(given, key) {
+  if (!given) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(key);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+function cookieKey(header) {
+  for (const part of (header ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === "tt_key") return part.slice(i + 1).trim();
+  }
+  return void 0;
+}
+async function startServer(opts = {}) {
   ensureDataHome();
-  const path = join2(dataHome(), "write.lock");
-  const deadline = Date.now() + (opts.waitMs ?? 0);
-  while (!tryAcquire(path)) {
-    if (Date.now() >= deadline) return "busy";
-    sleep(50);
-  }
-  try {
-    return fn();
-  } finally {
+  const root = resolve2(opts.root ?? projectsRoot());
+  const uiDir = resolve2(opts.uiDir ?? fileURLToPath(new URL("./ui/", import.meta.url)));
+  const idleMs = opts.idleMs ?? 30 * 60 * 1e3;
+  const debounceMs = opts.debounceMs ?? 500;
+  const key = randomBytes(32).toString("hex");
+  const db = openDb(opts.dbPath ?? dbPath());
+  const clients = /* @__PURE__ */ new Set();
+  let lastActivity = Date.now();
+  let port = 0;
+  let closed = false;
+  function runIndex(waitMs) {
+    if (closed) return { indexed: false, changed: [] };
+    let changed;
     try {
-      unlinkSync(path);
+      const r = withWriteLock(() => indexAll(db, { root }), { waitMs });
+      if (r === "busy") return { indexed: false, changed: [] };
+      changed = r.changedSessions;
     } catch {
+      return { indexed: false, changed: [] };
+    }
+    if (changed.length) {
+      const msg = `data: ${JSON.stringify({ changed })}
+
+`;
+      for (const c of clients) c.write(msg);
+    }
+    return { indexed: true, changed };
+  }
+  let debounce;
+  const schedule = () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => runIndex(2e3), debounceMs);
+  };
+  let watcher;
+  let poll;
+  const startPolling = () => {
+    watcher?.close();
+    watcher = void 0;
+    poll ??= setInterval(schedule, 2e3);
+  };
+  try {
+    watcher = watch(realpathSync.native(root), { recursive: true }, (_ev, name) => {
+      if (!name || String(name).endsWith(".jsonl")) schedule();
+    });
+    watcher.on("error", startPolling);
+  } catch {
+    startPolling();
+  }
+  function api(path, q) {
+    let seg;
+    try {
+      seg = path.split("/").slice(2).map(decodeURIComponent);
+    } catch {
+      throw new HttpError(400, "bad path");
+    }
+    const [name, arg] = seg;
+    if (seg.length > 2 || !name) throw new HttpError(404, "not found");
+    const found = (v) => {
+      if (v == null) throw new HttpError(404, "not found");
+      return v;
+    };
+    const sessionOr404 = (id) => {
+      const d = sessionDetail(db, id);
+      if (!d.session) throw new HttpError(404, "not found");
+      return d;
+    };
+    const range = () => parseRange(q.get("range"));
+    switch (name) {
+      case "overview":
+        return overview(db, range());
+      case "sessions":
+        return arg ? sessionOr404(arg) : sessions(db, range());
+      case "prompts":
+        return arg ? found(promptDetail(db, arg)) : prompts(db, range(), q.get("q") ?? void 0);
+      case "agents":
+        return arg ? agentDetail(db, arg, range()) : agents(db, range());
+      case "coverage":
+        return coverage(db);
+      default:
+        throw new HttpError(404, "not found");
     }
   }
+  function send(res, status, body, type, extra = {}) {
+    res.writeHead(status, {
+      "Content-Type": type,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": CSP,
+      ...extra
+    });
+    res.end(body);
+  }
+  const sendJson = (res, status, v) => send(res, status, JSON.stringify(v), "application/json; charset=utf-8");
+  function serveStatic(res, pathname, extra) {
+    let rel;
+    try {
+      rel = decodeURIComponent(pathname);
+    } catch {
+      throw new HttpError(400, "bad path");
+    }
+    if (rel.includes("\0")) throw new HttpError(400, "bad path");
+    let file = resolve2(uiDir, "." + (rel.startsWith("/") ? rel : "/" + rel));
+    if (file !== uiDir && !file.startsWith(uiDir + sep2)) throw new HttpError(403, "forbidden");
+    if (!existsSync5(file) || !statSync3(file).isFile()) file = resolve2(uiDir, "index.html");
+    if (!existsSync5(file)) throw new HttpError(404, "ui not built");
+    send(res, 200, readFileSync4(file), MIME[extname(file).toLowerCase()] ?? "application/octet-stream", extra);
+  }
+  function handle(req, res) {
+    lastActivity = Date.now();
+    const host = req.headers.host;
+    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) throw new HttpError(403, "bad host");
+    const origin = req.headers.origin;
+    if (origin !== void 0 && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) {
+      throw new HttpError(403, "bad origin");
+    }
+    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+    const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
+    const queryKey = req.method === "GET" && url.pathname === "/" ? url.searchParams.get("key") ?? void 0 : void 0;
+    const viaQuery = sameKey(queryKey, key);
+    if (!viaQuery && !sameKey(bearer, key) && !sameKey(cookieKey(req.headers.cookie), key)) {
+      throw new HttpError(401, "unauthorized");
+    }
+    const cookie = viaQuery ? { "Set-Cookie": `tt_key=${key}; HttpOnly; SameSite=Strict; Path=/` } : {};
+    if (url.pathname === "/api/poke") {
+      if (req.method !== "POST") throw new HttpError(405, "method not allowed");
+      const r = runIndex(1e3);
+      return sendJson(res, 200, { ok: true, indexed: r.indexed, changed: r.changed });
+    }
+    if (url.pathname === "/api/events") {
+      if (req.method !== "GET") throw new HttpError(405, "method not allowed");
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+        "X-Content-Type-Options": "nosniff"
+      });
+      res.write(": connected\n\n");
+      clients.add(res);
+      const beat = setInterval(() => res.write(": ping\n\n"), HEARTBEAT_MS);
+      res.on("close", () => {
+        clearInterval(beat);
+        clients.delete(res);
+        lastActivity = Date.now();
+      });
+      return;
+    }
+    if (url.pathname.startsWith("/api/")) {
+      if (req.method !== "GET") throw new HttpError(405, "method not allowed");
+      return sendJson(res, 200, api(url.pathname, url.searchParams));
+    }
+    if (req.method !== "GET") throw new HttpError(405, "method not allowed");
+    serveStatic(res, url.pathname, cookie);
+  }
+  const server = createServer((req, res) => {
+    try {
+      handle(req, res);
+    } catch (e) {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      if (e instanceof HttpError) {
+        sendJson(res, e.status, { error: e.message });
+        return;
+      }
+      sendJson(res, 500, { error: "internal error" });
+    }
+  });
+  const serverFile = stateFile("server.json");
+  const removeServerFile = () => {
+    try {
+      const cur = JSON.parse(readFileSync4(serverFile, "utf8"));
+      if (cur.pid === process.pid && cur.key === key) rmSync(serverFile, { force: true });
+    } catch {
+    }
+  };
+  const onExit = () => removeServerFile();
+  const onSignal = () => {
+    void close().then(() => {
+      opts.onClosed?.();
+      process.exit(0);
+    });
+  };
+  let idleTimer;
+  let closing;
+  function close() {
+    closing ??= new Promise((done) => {
+      closed = true;
+      clearTimeout(debounce);
+      clearInterval(idleTimer);
+      if (poll) clearInterval(poll);
+      watcher?.close();
+      process.off("exit", onExit);
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+      removeServerFile();
+      for (const c of clients) c.end();
+      clients.clear();
+      server.close(() => {
+        try {
+          db.close();
+        } catch {
+        }
+        done();
+      });
+      server.closeAllConnections();
+    });
+    return closing;
+  }
+  await new Promise((ok, fail) => {
+    server.once("error", fail);
+    server.listen(opts.port ?? 0, "127.0.0.1", () => ok());
+  });
+  port = server.address().port;
+  writeFileSync(
+    serverFile,
+    JSON.stringify({ pid: process.pid, port, key, startedAt: (/* @__PURE__ */ new Date()).toISOString() }),
+    { mode: 384 }
+  );
+  process.on("exit", onExit);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  idleTimer = setInterval(() => {
+    if (clients.size === 0 && Date.now() - lastActivity >= idleMs) void close().then(() => opts.onClosed?.());
+  }, Math.max(20, Math.min(1e3, idleMs / 4)));
+  idleTimer.unref();
+  setTimeout(() => runIndex(2e3), 0);
+  return { url: `http://127.0.0.1:${port}/?key=${key}`, port, key, close };
 }
+var MIME, CSP, PRESETS, HEARTBEAT_MS, HttpError;
+var init_server = __esm({
+  "src/server/server.ts"() {
+    "use strict";
+    init_paths();
+    init_indexer();
+    init_lock();
+    init_views();
+    init_db();
+    MIME = {
+      ".html": "text/html; charset=utf-8",
+      ".js": "text/javascript; charset=utf-8",
+      ".mjs": "text/javascript; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".json": "application/json; charset=utf-8",
+      ".svg": "image/svg+xml",
+      ".png": "image/png",
+      ".ico": "image/x-icon",
+      ".woff2": "font/woff2",
+      ".woff": "font/woff",
+      ".map": "application/json"
+    };
+    CSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'";
+    PRESETS = ["today", "week", "month", "all"];
+    HEARTBEAT_MS = 25e3;
+    HttpError = class extends Error {
+      constructor(status, message) {
+        super(message);
+        this.status = status;
+      }
+      status;
+    };
+  }
+});
 
 // src/cli.ts
+init_paths();
+init_lock();
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync as existsSync6, readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "node:fs";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 var MIN_NODE = [22, 13, 0];
 function nodeTooOld(version) {
   const v = version.split(".").map((n) => parseInt(n, 10) || 0);
@@ -1037,7 +1826,7 @@ function spawnBackfill() {
     log("hook-start: backfill spawn skipped (TOKEN_TRACKER_NO_SPAWN)");
     return;
   }
-  const cli = fileURLToPath(import.meta.url);
+  const cli = fileURLToPath2(import.meta.url);
   spawn(process.execPath, [cli, "backfill"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
 }
 var BACKFILL_STALE_MS = 15 * 60 * 1e3;
@@ -1060,18 +1849,18 @@ async function backfillAbandoned() {
 async function hookStart() {
   ensureDataHome();
   const marker = stateFile("installed.json");
-  if (existsSync4(marker)) {
+  if (existsSync6(marker)) {
     if (await backfillAbandoned()) spawnBackfill();
     return;
   }
-  writeFileSync(marker, JSON.stringify({ installedAt: (/* @__PURE__ */ new Date()).toISOString() }), { mode: 384 });
+  writeFileSync2(marker, JSON.stringify({ installedAt: (/* @__PURE__ */ new Date()).toISOString() }), { mode: 384 });
   spawnBackfill();
 }
 async function pokeServer() {
   try {
     const file = stateFile("server.json");
-    if (!existsSync4(file)) return false;
-    const { pid, port, key } = JSON.parse(readFileSync3(file, "utf8"));
+    if (!existsSync6(file)) return false;
+    const { pid, port, key } = JSON.parse(readFileSync5(file, "utf8"));
     if (!pidAlive(pid)) return false;
     const res = await fetch(`http://127.0.0.1:${port}/api/poke`, {
       method: "POST",
@@ -1135,6 +1924,18 @@ async function run(sub) {
         console.log(summary(r));
       }, 6e4);
       if (!ran) console.log("another indexer is running; skipped");
+      return;
+    }
+    case "serve": {
+      const { startServer: startServer2 } = await Promise.resolve().then(() => (init_server(), server_exports));
+      await new Promise((done) => {
+        startServer2({ onClosed: done }).then((s) => {
+          console.log(`Token Tracker serving on ${s.url}`);
+        }, (e) => {
+          log(`serve failed: ${errText(e)}`);
+          done();
+        });
+      });
       return;
     }
     default:
