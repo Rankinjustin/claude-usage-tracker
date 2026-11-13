@@ -1,5 +1,5 @@
-import { chmodSync, existsSync } from 'node:fs';
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { chmodSync, closeSync, existsSync, openSync } from 'node:fs';
+import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite';
 import type { TokenParts, ToolUse } from '../core/types';
 import { dbPath, ensureDataHome } from '../core/paths';
 import schema from './schema.sql?raw';
@@ -76,6 +76,8 @@ function migrate(raw: DatabaseSync): void {
 export function openDb(path: string): Db {
   if (path === dbPath()) ensureDataHome();
   const existed = existsSync(path);
+  // Pre-create at 0600 so SQLite's -wal/-shm side files inherit the mode.
+  if (!existed && process.platform !== 'win32') closeSync(openSync(path, 'a', 0o600));
   const raw = new DatabaseSync(path);
   raw.exec('PRAGMA journal_mode = WAL');
   raw.exec('PRAGMA foreign_keys = ON');
@@ -85,7 +87,12 @@ export function openDb(path: string): Db {
     try { chmodSync(path, 0o600); } catch { /* best effort */ }
   }
 
-  const q = (sql: string) => raw.prepare(sql);
+  const stmts = new Map<string, StatementSync>();
+  const q = (sql: string): StatementSync => {
+    let st = stmts.get(sql);
+    if (!st) { st = raw.prepare(sql); stmts.set(sql, st); }
+    return st;
+  };
   const run = (sql: string, ...p: SQLInputValue[]): void => { q(sql).run(...p); };
 
   const insertToolCall = (t: ToolCallRow): void => {
@@ -102,6 +109,8 @@ export function openDb(path: string): Db {
       p.ended_ts, p.result_chars, p.is_error, p.denied, p.permission, t.toolUseId);
     run('DELETE FROM pending_results WHERE tool_use_id = ?', t.toolUseId);
   };
+
+  let depth = 0;
 
   const db: Db = {
     raw,
@@ -196,8 +205,12 @@ export function openDb(path: string): Db {
       },
     },
     transaction(fn) {
-      if (raw.isTransaction) return fn(); // nested: join the outer transaction
+      if (depth > 0) { // nested: join the outer transaction; a throw propagates and the outer rolls back
+        depth++;
+        try { return fn(); } finally { depth--; }
+      }
       raw.exec('BEGIN IMMEDIATE');
+      depth = 1;
       try {
         const out = fn();
         raw.exec('COMMIT');
@@ -205,6 +218,8 @@ export function openDb(path: string): Db {
       } catch (e) {
         raw.exec('ROLLBACK');
         throw e;
+      } finally {
+        depth = 0;
       }
     },
     close() { raw.close(); },

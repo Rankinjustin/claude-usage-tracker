@@ -94,6 +94,25 @@ describe('store', () => {
     if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
+  it('wal side file is 0600 on posix after a write', () => {
+    const { db, path } = open();
+    db.upsertApiCall(call());
+    if (process.platform !== 'win32') expect(statSync(`${path}-wal`).mode & 0o777).toBe(0o600);
+    db.close();
+  });
+
+  it('nested transaction: outer transaction containing upsertApiCall rolls back everything on throw', () => {
+    const { db, path } = open();
+    expect(() => db.transaction(() => {
+      db.upsertApiCall(call({}, [tu('t1')]));
+      throw new Error('boom');
+    })).toThrow('boom');
+    db.transaction(() => { db.upsertApiCall(call({ messageId: 'm2' })); });
+    db.close();
+    expect(raw(path, 'select message_id from api_calls').map((r) => r.message_id)).toEqual(['m2']);
+    expect(raw(path, 'select * from tool_calls')).toHaveLength(0);
+  });
+
   it('upsertSession merges earliest first, latest last, non-null over null', () => {
     const { db, path } = open();
     db.upsertSession({ id: 's1', title: null, project: 'p', cwd: null, firstTs: '2026-01-02', lastTs: '2026-01-02',
