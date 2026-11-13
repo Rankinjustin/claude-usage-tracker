@@ -9,7 +9,13 @@ export interface IndexResult {
   files: number; newCalls: number; newPrompts: number; changedSessions: string[];
   /** Transcript bytes read this pass (0 when nothing changed). */
   bytesRead: number;
+  /** Files that threw; their offsets did not move, so the next pass retries them. */
+  failed: number;
+  errors: { path: string; message: string }[];
 }
+
+/** Internal knobs; `chunkSize` exists so tests can force lines across read boundaries. */
+export interface IndexFileOptions { chunkSize?: number }
 
 const CHUNK = 4 * 1024 * 1024;
 const NL = 0x0a;
@@ -18,13 +24,17 @@ const SESSION_RE = /"sessionId"\s*:\s*"([^"]+)"/;
 /** Transcripts say `claude-opus-5-5`; the price table and the store use `opus-5-5`. */
 const shortModel = (m: string): string => m.replace(/^claude-/, '');
 
-const empty = (): IndexResult => ({ files: 0, newCalls: 0, newPrompts: 0, changedSessions: [], bytesRead: 0 });
+const empty = (): IndexResult => ({
+  files: 0, newCalls: 0, newPrompts: 0, changedSessions: [], bytesRead: 0, failed: 0, errors: [],
+});
 
 function add(into: IndexResult, r: IndexResult): void {
   into.files += r.files;
   into.newCalls += r.newCalls;
   into.newPrompts += r.newPrompts;
   into.bytesRead += r.bytesRead;
+  into.failed += r.failed;
+  into.errors.push(...r.errors);
   for (const s of r.changedSessions) if (!into.changedSessions.includes(s)) into.changedSessions.push(s);
 }
 
@@ -60,18 +70,26 @@ export function indexAll(
   const files = listTranscripts(root);
   const out = empty();
   files.forEach((f, i) => {
-    add(out, indexFile(db, f));
+    try {
+      add(out, indexFile(db, f));
+    } catch (e) {
+      // One bad file (locked, vanished mid-read, db error) must not stop the rest of the pass.
+      out.failed++;
+      out.errors.push({ path: f, message: e instanceof Error ? e.message : String(e) });
+    }
     opts.onProgress?.(i + 1, files.length);
   });
   const seen = new Set(files);
   for (const p of db.presentFiles()) {
     if (p.startsWith(root + sep) && !seen.has(p)) db.markFileMissing(p);
   }
+  // A subagent indexed before the file holding its launching tool call gets its parent now.
+  db.resolveRunParents();
   return out;
 }
 
 /** Indexes the complete lines a transcript gained since the last pass, in one transaction. */
-export function indexFile(db: Db, path: string): IndexResult {
+export function indexFile(db: Db, path: string, opts: IndexFileOptions = {}): IndexResult {
   const p = resolve(path);
   const prev = db.getFileState(p);
   let st;
@@ -88,13 +106,19 @@ export function indexFile(db: Db, path: string): IndexResult {
   const rescan = st.size < offset;
   if (rescan) offset = 0;
 
-  const fd = openSync(p, 'r');
+  let fd: number;
+  try { fd = openSync(p, 'r'); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    if (prev) db.markFileMissing(p);
+    return empty();
+  }
   try {
     db.transaction(() => {
       let sid = rescan ? null : prev?.sessionId ?? null;
       let runId = '';
       const promptKey = `lastPrompt:${p}`;
       let lastPrompt = isSub || offset === 0 ? null : db.meta.get(promptKey);
+      if (!isSub && offset === 0) db.meta.delete(promptKey); // a rescan must not reuse pre-truncation prompts
       let title: string | null = null;
       let cwd: string | null = null;
       let ccVersion: string | null = null;
@@ -163,12 +187,13 @@ export function indexFile(db: Db, path: string): IndexResult {
       };
 
       // Read [offset, size) in chunks; only bytes up to the last newline are consumed.
-      const buf = Buffer.allocUnsafe(CHUNK);
+      const chunk = opts.chunkSize ?? CHUNK;
+      const buf = Buffer.allocUnsafe(chunk);
       let carry: Buffer = Buffer.alloc(0);
       let pos = offset;
       let consumed = offset;
       while (pos < st.size) {
-        const n = readSync(fd, buf, 0, Math.min(CHUNK, st.size - pos), pos);
+        const n = readSync(fd, buf, 0, Math.min(chunk, st.size - pos), pos);
         if (n <= 0) break;
         pos += n;
         out.bytesRead += n;

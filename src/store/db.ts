@@ -62,7 +62,9 @@ export interface Db {
   markFileMissing(path: string): void;
   /** Paths of tracked files not yet marked missing. */
   presentFiles(): string[];
-  meta: { get(key: string): string | null; set(key: string, value: string): void };
+  /** Fills missing parent_run_id from the run that holds the launching tool call; returns rows updated. */
+  resolveRunParents(): number;
+  meta: { get(key: string): string | null; set(key: string, value: string): void; delete(key: string): void };
   transaction<T>(fn: () => T): T;
   close(): void;
 }
@@ -215,7 +217,16 @@ export function openDb(path: string): Db {
     presentFiles() {
       return (q('SELECT path FROM files WHERE missing = 0').all() as { path: string }[]).map((r) => r.path);
     },
+    resolveRunParents() {
+      return Number(q(`UPDATE runs SET parent_run_id =
+          (SELECT t.run_id FROM tool_calls t WHERE t.tool_use_id = runs.launch_tool_use_id)
+        WHERE parent_run_id IS NULL AND launch_tool_use_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM tool_calls t WHERE t.tool_use_id = runs.launch_tool_use_id)`).run().changes);
+    },
     meta: {
+      delete(key) {
+        run('DELETE FROM meta WHERE key = ?', key);
+      },
       get(key) {
         const r = q('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
         return r ? r.value : null;

@@ -154,9 +154,9 @@ describe('indexer', () => {
       launch_tool_use_id: meta.toolUseId });
     const launch = one(db, 'SELECT * FROM tool_calls WHERE tool_use_id = ?', meta.toolUseId);
     expect(launch).toBeTruthy();
-    expect(launch.run_id).toBe(`main:${launch.run_id.slice(5)}`);
-    expect(run.parent_run_id).toBe(launch.run_id);
-    expect(run.session_id).toBe(launch.run_id.slice(5));
+    expect(launch.run_id).toBe(`main:${SID(47)}`);
+    expect(run.parent_run_id).toBe(`main:${SID(47)}`);
+    expect(run.session_id).toBe(SID(47));
     const calls = all(db, 'SELECT * FROM api_calls WHERE run_id = ?', AGENT);
     expect(calls).toHaveLength(1);
     // a subagent's prompt is resolved through the launching tool call, not stored on its calls
@@ -225,6 +225,78 @@ describe('indexer', () => {
     expect(t.ended_ts).toBe(res.timestamp);
     expect(t.result_chars).toBeGreaterThan(0);
     expect(one(db, 'SELECT COUNT(*) n FROM pending_results').n).toBe(0);
+  });
+
+  it('one unreadable file does not stop the pass', () => {
+    const { root, proj, db } = setup();
+    // 'a…' sorts before 'b…', so the failing file comes first in the pass
+    const bad = join(proj, `a-${SID(56)}.jsonl`);
+    const good = join(proj, `b-${SID(4)}.jsonl`);
+    copyFileSync(join(FX, 'mcp.jsonl'), bad);
+    copyFileSync(join(FX, 'split-response.jsonl'), good);
+    db.raw.exec(`CREATE TRIGGER fail_one BEFORE INSERT ON api_calls WHEN NEW.session_id = '${SID(56)}'
+      BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`);
+    const r = indexAll(db, { root });
+    expect(r.failed).toBe(1);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].path).toBe(bad);
+    expect(r.errors[0].message).toContain('simulated write failure');
+    expect(r.newCalls).toBe(1); // the later file still indexed
+    expect(one(db, 'SELECT COUNT(*) n FROM api_calls WHERE session_id = ?', SID(4)).n).toBe(1);
+    expect(db.getFileState(bad)).toBeNull(); // rolled back: nothing recorded, retried next pass
+    db.raw.exec('DROP TRIGGER fail_one');
+    const r2 = indexAll(db, { root });
+    expect(r2.failed).toBe(0);
+    expect(r2.newCalls).toBe(1);
+  });
+
+  it('subagent indexed before parent gets parent_run_id after the pass', () => {
+    const { root, proj, db } = setup();
+    copyFileSync(join(FX, 'agent.jsonl'), join(proj, `${SID(47)}.jsonl`));
+    const sub = join(proj, SID(47), 'subagents');
+    mkdirSync(sub, { recursive: true });
+    const subFile = join(sub, `${AGENT}.jsonl`);
+    copyFileSync(join(SUB, `${AGENT}.jsonl`), subFile);
+    // depth 2: no main-thread fallback, the parent must come from the launching tool call
+    const meta = JSON.parse(readFileSync(join(SUB, `${AGENT}.meta.json`), 'utf8'));
+    writeFileSync(join(sub, `${AGENT}.meta.json`), JSON.stringify({ ...meta, spawnDepth: 2 }));
+    indexFile(db, subFile);
+    expect(one(db, 'SELECT parent_run_id FROM runs WHERE id = ?', AGENT).parent_run_id).toBeNull();
+    const r = indexAll(db, { root }); // subagent file unchanged, so only the re-resolution can fix it
+    expect(r.failed).toBe(0);
+    expect(one(db, 'SELECT parent_run_id FROM runs WHERE id = ?', AGENT).parent_run_id).toBe(`main:${SID(47)}`);
+  });
+
+  it('rescan from 0 without a prompt does not reuse the pre-truncation prompt', () => {
+    const { proj, db } = setup();
+    const sid = SID(12);
+    const f = join(proj, `${sid}.jsonl`);
+    writeFileSync(f, `${promptLine(sid, '2026-11-03T15:00:00.000Z', 'old', 'u-old')}\n${fxLines('agent.jsonl')[0]}\n`);
+    indexFile(db, f);
+    const shorter = `${fxLines('mcp.jsonl')[0]}\n`;
+    expect(Buffer.byteLength(shorter)).toBeLessThan(db.getFileState(f)!.offset);
+    writeFileSync(f, shorter);
+    indexFile(db, f);
+    // a later tail pass (offset > 0) must not pick the old prompt back up from stored state
+    appendFileSync(f, `${fxLines('skill-slash.jsonl')[0]}\n`);
+    indexFile(db, f);
+    for (const name of ['mcp.jsonl', 'skill-slash.jsonl']) {
+      const id = JSON.parse(fxLines(name)[0]).message.id;
+      expect(one(db, 'SELECT prompt_uuid FROM api_calls WHERE message_id = ?', id).prompt_uuid, name).toBeNull();
+    }
+  });
+
+  it('multi-byte UTF-8 line straddling a read chunk boundary decodes intact', () => {
+    const { proj, db } = setup();
+    const sid = SID(13);
+    const f = join(proj, `${sid}.jsonl`);
+    const text = 'naïve café — 日本語 🚀 '.repeat(20);
+    writeFileSync(f, `${promptLine(sid, '2026-11-03T15:00:00.000Z', text, 'u-utf8')}\n`);
+    // 7-byte chunks split the 2-, 3- and 4-byte sequences many times over
+    const r = indexFile(db, f, { chunkSize: 7 });
+    expect(r.newPrompts).toBe(1);
+    expect(one(db, 'SELECT text FROM prompts WHERE uuid = ?', 'u-utf8').text).toBe(text);
+    expect(db.getFileState(f)?.offset).toBe(readFileSync(f).length);
   });
 
   it('parity with reference script', () => {
