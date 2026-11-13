@@ -159,6 +159,20 @@ describe('parseLine: user records', () => {
     expect(parseLine(ls[3])).toEqual([{ kind: 'slash_command', ts: json(ls[3]).timestamp, name: 'custom-command-1' }]);
   });
 
+  it('prompt containing a command tag mid-text stays a prompt', () => {
+    const rec = JSON.stringify({ type: 'user', uuid: 'u', sessionId: 's', timestamp: 't',
+      message: { role: 'user', content: 'what does <command-name>/x</command-name> mean?' } });
+    expect(parseLine(rec)).toMatchObject([{ kind: 'prompt' }]);
+  });
+
+  it('output tokens never go negative and ignored results are not shared', () => {
+    const rec = JSON.stringify({ type: 'assistant', timestamp: 't', sessionId: 's', message: { id: 'm', model: 'x',
+      content: [], usage: { input_tokens: 1, output_tokens: 5, output_tokens_details: { thinking_tokens: 9 } } } });
+    expect((parseLine(rec)[0] as any).tokens.output).toBe(0);
+    const a = parseLine('nope');
+    expect(a).not.toBe(parseLine('nope'));
+  });
+
   it('plain user text is a prompt, with text blocks joined', () => {
     const ls = lines('split-response.jsonl');
     const p = parseLine(ls[0]);

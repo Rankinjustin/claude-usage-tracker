@@ -2,7 +2,7 @@ import type { AdvisorUsage, ParsedLine, TokenParts, ToolUse } from '../core/type
 
 type Obj = Record<string, unknown>;
 
-const IGNORED: ParsedLine[] = [{ kind: 'ignored' }];
+const ignored = (): ParsedLine[] => [{ kind: 'ignored' }];
 const NOT_PROMPT_PREFIXES = ['<local-command', '<system-reminder>', '<task-notification', 'Caveat:'];
 const IMAGE_CHARS = 6000;
 
@@ -45,12 +45,12 @@ export function parseSubagentMeta(json: string): {
 /** Parses one transcript line into zero-information `ignored` or typed records. Never throws. */
 export function parseLine(line: string): ParsedLine[] {
   let rec: unknown;
-  try { rec = JSON.parse(line); } catch { return IGNORED; }
-  if (!isObj(rec)) return IGNORED;
+  try { rec = JSON.parse(line); } catch { return ignored(); }
+  if (!isObj(rec)) return ignored();
   try {
     return parseRecord(rec, line);
   } catch {
-    return IGNORED;
+    return ignored();
   }
 }
 
@@ -62,9 +62,9 @@ function parseRecord(rec: Obj, raw: string): ParsedLine[] {
     case 'ai-title': {
       const sessionId = str(rec.sessionId);
       const title = str(rec.aiTitle);
-      return sessionId !== null && title !== null ? [{ kind: 'title', sessionId, title }] : IGNORED;
+      return sessionId !== null && title !== null ? [{ kind: 'title', sessionId, title }] : ignored();
     }
-    default: return IGNORED;
+    default: return ignored();
   }
 }
 
@@ -77,20 +77,20 @@ function tokensOf(u: Obj, thinking: number): TokenParts {
     cacheWrite5m: hasTiers ? num(cc!.ephemeral_5m_input_tokens) : num(u.cache_creation_input_tokens),
     cacheWrite1h: hasTiers ? num(cc!.ephemeral_1h_input_tokens) : 0,
     cacheRead: num(u.cache_read_input_tokens),
-    output: num(u.output_tokens) - thinking,
+    output: Math.max(0, num(u.output_tokens) - thinking),
     thinking,
   };
 }
 
 function parseAssistant(rec: Obj, raw: string): ParsedLine[] {
   const msg = rec.message;
-  if (!isObj(msg)) return IGNORED;
+  if (!isObj(msg)) return ignored();
   const model = str(msg.model);
-  if (!model || model === '<synthetic>') return IGNORED;
+  if (!model || model === '<synthetic>') return ignored();
   const messageId = str(msg.id) ?? str(rec.requestId);
   const ts = str(rec.timestamp);
   const usage = msg.usage;
-  if (!messageId || !ts || !isObj(usage)) return IGNORED;
+  if (!messageId || !ts || !isObj(usage)) return ignored();
 
   const details = isObj(usage.output_tokens_details) ? usage.output_tokens_details : {};
   const tokens = tokensOf(usage, num(details.thinking_tokens));
@@ -152,7 +152,7 @@ function resultChars(content: unknown): number {
 function parseUser(rec: Obj, raw: string): ParsedLine[] {
   const ts = str(rec.timestamp);
   const msg = rec.message;
-  if (!ts || !isObj(msg)) return IGNORED;
+  if (!ts || !isObj(msg)) return ignored();
   const content = msg.content;
 
   const blocks = Array.isArray(content) ? content.filter(isObj) : [];
@@ -172,22 +172,22 @@ function parseUser(rec: Obj, raw: string): ParsedLine[] {
     }));
   }
 
-  if (rec.isMeta === true || rec.isCompactSummary === true || rec.isSidechain === true) return IGNORED;
+  if (rec.isMeta === true || rec.isCompactSummary === true || rec.isSidechain === true) return ignored();
   const text = typeof content === 'string'
     ? content
     : blocks.filter((b) => b.type === 'text').map((b) => str(b.text) ?? '').join('\n');
-  if (!text) return IGNORED;
+  if (!text) return ignored();
 
-  const cmd = /<command-name>\/?([^<]*)<\/command-name>/.exec(text);
-  if (cmd) return [{ kind: 'slash_command', ts, name: cmd[1] }];
   const head = text.trimStart();
-  if (NOT_PROMPT_PREFIXES.some((p) => head.startsWith(p))) return IGNORED;
+  const cmd = /^<command-(?:message|name)>/.test(head) ? /<command-name>\/?([^<]*)<\/command-name>/.exec(text) : null;
+  if (cmd) return [{ kind: 'slash_command', ts, name: cmd[1] }];
+  if (NOT_PROMPT_PREFIXES.some((p) => head.startsWith(p))) return ignored();
   return [{ kind: 'prompt', uuid: str(rec.uuid) ?? '', sessionId: str(rec.sessionId) ?? '', ts, text, raw }];
 }
 
 function parseSystem(rec: Obj): ParsedLine[] {
   const ts = str(rec.timestamp);
-  if (!ts) return IGNORED;
+  if (!ts) return ignored();
   switch (rec.subtype) {
     case 'turn_duration':
       return [{ kind: 'turn_duration', ts, durationMs: num(rec.durationMs) }];
@@ -202,6 +202,6 @@ function parseSystem(rec: Obj): ParsedLine[] {
         runs: infos.map((h) => ({ command: str(h.command) ?? '', durationMs: num(h.durationMs) })) }];
     }
     default:
-      return IGNORED;
+      return ignored();
   }
 }
