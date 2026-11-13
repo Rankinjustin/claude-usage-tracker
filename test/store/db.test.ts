@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openDb, type ApiCallRow, type Db } from '../../src/store/db';
 import type { TokenParts, ToolUse } from '../../src/core/types';
+import schemaV1 from '../../src/store/schema.sql?raw';
 
 const dirs: string[] = [];
 const open = (): { db: Db; path: string } => {
@@ -168,5 +169,26 @@ describe('store', () => {
     db.close();
     expect(raw(path, 'select * from tool_calls')).toHaveLength(0);
     expect(raw(path, 'select * from pending_results')).toHaveLength(1);
+  });
+
+  it('migration v2 drops duplicate compactions and hook runs and keys them', () => {
+    const d = mkdtempSync(join(tmpdir(), 'tt db '));
+    dirs.push(d);
+    const path = join(d, 'tracker.db');
+    const v1 = new DatabaseSync(path);
+    v1.exec(schemaV1);
+    v1.exec('PRAGMA user_version = 1');
+    for (let i = 0; i < 2; i++) {
+      v1.exec("INSERT INTO compactions (session_id, ts, pre_tokens) VALUES ('s1', 't1', 5)");
+      v1.exec("INSERT INTO hook_runs (session_id, ts, command, duration_ms) VALUES ('s1', 't1', 'c', 3)");
+    }
+    v1.close();
+    const db = openDb(path);
+    db.insertCompaction({ sessionId: 's1', runId: null, ts: 't1', preTokens: 5, durationMs: 0, trigger: '' });
+    db.insertHookRuns('s1', 't1', [{ command: 'c', durationMs: 3 }]);
+    db.close();
+    expect(raw(path, 'PRAGMA user_version')[0].user_version).toBe(2);
+    expect(raw(path, 'select * from compactions')).toHaveLength(1);
+    expect(raw(path, 'select * from hook_runs')).toHaveLength(1);
   });
 });

@@ -5,7 +5,14 @@ import { dbPath, ensureDataHome } from '../core/paths';
 import schema from './schema.sql?raw';
 
 /** Ordered migrations; `PRAGMA user_version` is the number applied. Append only. */
-const MIGRATIONS: string[] = [schema];
+const MIGRATIONS: string[] = [
+  schema,
+  // v2: compactions and hook runs are keyed so a rescan from offset 0 cannot duplicate them.
+  `DELETE FROM compactions WHERE rowid NOT IN (SELECT MIN(rowid) FROM compactions GROUP BY session_id, ts);
+   CREATE UNIQUE INDEX compactions_key ON compactions(session_id, ts);
+   DELETE FROM hook_runs WHERE rowid NOT IN (SELECT MIN(rowid) FROM hook_runs GROUP BY session_id, ts, command);
+   CREATE UNIQUE INDEX hook_runs_key ON hook_runs(session_id, ts, command);`,
+];
 
 export interface SessionRow {
   id: string; title: string | null; project: string | null; cwd: string | null;
@@ -41,8 +48,11 @@ export interface Db {
   readonly raw: DatabaseSync;
   upsertSession(s: SessionRow): void;
   upsertRun(r: RunRow): void;
-  insertPrompt(p: PromptRow): void;
-  upsertApiCall(c: ApiCallRow & { toolUses: ToolUse[]; advisor: AdvisorRow[] }): void;
+  /** Returns true when the prompt is new. */
+  insertPrompt(p: PromptRow): boolean;
+  setPromptDuration(uuid: string, durationMs: number): void;
+  /** Returns true when this message id was not stored before. */
+  upsertApiCall(c: ApiCallRow & { toolUses: ToolUse[]; advisor: AdvisorRow[] }): boolean;
   insertToolCall(t: ToolCallRow): void;
   completeToolCall(toolUseId: string, r: ToolResultRow): void;
   insertCompaction(c: CompactionRow): void;
@@ -50,6 +60,8 @@ export interface Db {
   getFileState(path: string): (FileState & { missing: boolean }) | null;
   setFileState(path: string, s: FileState): void;
   markFileMissing(path: string): void;
+  /** Paths of tracked files not yet marked missing. */
+  presentFiles(): string[];
   meta: { get(key: string): string | null; set(key: string, value: string): void };
   transaction<T>(fn: () => T): T;
   close(): void;
@@ -133,12 +145,17 @@ export function openDb(path: string): Db {
       r.id, r.sessionId, r.agentType, r.description, r.launchToolUseId, r.parentRunId, r.file);
     },
     insertPrompt(p) {
-      run(`INSERT INTO prompts (uuid, session_id, ts, text, duration_ms) VALUES (?,?,?,?,?)
-        ON CONFLICT(uuid) DO UPDATE SET duration_ms = COALESCE(excluded.duration_ms, duration_ms)`,
-      p.uuid, p.sessionId, p.ts, p.text, p.durationMs);
+      const r = q('INSERT OR IGNORE INTO prompts (uuid, session_id, ts, text, duration_ms) VALUES (?,?,?,?,?)')
+        .run(p.uuid, p.sessionId, p.ts, p.text, p.durationMs);
+      if (r.changes > 0) return true;
+      if (p.durationMs !== null) db.setPromptDuration(p.uuid, p.durationMs);
+      return false;
+    },
+    setPromptDuration(uuid, durationMs) {
+      run('UPDATE prompts SET duration_ms = ? WHERE uuid = ?', durationMs, uuid);
     },
     upsertApiCall(c) {
-      db.transaction(() => {
+      return db.transaction(() => {
         const t = c.tokens;
         const r = q(`INSERT OR IGNORE INTO api_calls
           (message_id, session_id, run_id, prompt_uuid, ts, model, effort, speed, input, cache_write_5m,
@@ -157,6 +174,7 @@ export function openDb(path: string): Db {
           insertToolCall({ toolUseId: u.id, messageId: c.messageId, runId: c.runId, promptUuid: c.promptUuid,
             name: u.name, label: u.label, skill: u.skill, inputJson: u.inputJson, startedTs: c.ts });
         }
+        return r.changes > 0;
       });
     },
     insertToolCall,
@@ -169,12 +187,12 @@ export function openDb(path: string): Db {
         VALUES (?,?,?,?,?,?)`, id, r.endedTs, r.resultChars, flag(r.isError), flag(r.denied), r.permission);
     },
     insertCompaction(c) {
-      run(`INSERT INTO compactions (session_id, run_id, ts, pre_tokens, duration_ms, trigger) VALUES (?,?,?,?,?,?)`,
+      run(`INSERT OR IGNORE INTO compactions (session_id, run_id, ts, pre_tokens, duration_ms, trigger) VALUES (?,?,?,?,?,?)`,
         c.sessionId, c.runId, c.ts, c.preTokens, c.durationMs, c.trigger);
     },
     insertHookRuns(sessionId, ts, runs) {
       for (const h of runs) {
-        run('INSERT INTO hook_runs (session_id, ts, command, duration_ms) VALUES (?,?,?,?)',
+        run('INSERT OR IGNORE INTO hook_runs (session_id, ts, command, duration_ms) VALUES (?,?,?,?)',
           sessionId, ts, h.command, h.durationMs);
       }
     },
@@ -193,6 +211,9 @@ export function openDb(path: string): Db {
     },
     markFileMissing(path) {
       run('UPDATE files SET missing = 1 WHERE path = ?', path);
+    },
+    presentFiles() {
+      return (q('SELECT path FROM files WHERE missing = 0').all() as { path: string }[]).map((r) => r.path);
     },
     meta: {
       get(key) {

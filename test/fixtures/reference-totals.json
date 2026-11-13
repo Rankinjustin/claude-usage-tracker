@@ -1,0 +1,56 @@
+{
+  "source": "token_dashboard.py --root test/fixtures --days 3650 (trimmed to the fields the parity test reads)",
+  "summary": [
+    {
+      "generated": "2026-11-13T14:44-06:00",
+      "start": "2016-11-15",
+      "end": "2026-11-13",
+      "days": 3650,
+      "active_days": 3,
+      "total": 0.8423,
+      "tokens": 594525,
+      "calls": 6,
+      "sessions": 5,
+      "prompts": 1,
+      "tool_calls": 8,
+      "cache_hit_pct": 92.2,
+      "cache_pct": 15.9,
+      "output_pct": 3.4,
+      "subagent_cost": 0.0034,
+      "subagent_pct": 0.4,
+      "main_avg_ctx": 87808,
+      "per_prompt": 0.8423,
+      "advisor_cost": 0.6795,
+      "advisor_calls": 1,
+      "recache_cost": 0.0,
+      "recache_events": 0,
+      "big_ctx_cost": 0.7538,
+      "big_ctx_pct": 89.5,
+      "compactions": 1,
+      "base_ctx_median": 52913
+    }
+  ],
+  "models": [
+    {
+      "name": "advisor · opus-5-5",
+      "calls": 1,
+      "cost": 0.6795,
+      "tokens": 128901,
+      "pct": 80.7
+    },
+    {
+      "name": "opus-5-5",
+      "calls": 4,
+      "cost": 0.1587,
+      "tokens": 412019,
+      "pct": 18.8
+    },
+    {
+      "name": "haiku-5-5",
+      "calls": 2,
+      "cost": 0.0041,
+      "tokens": 53605,
+      "pct": 0.5
+    }
+  ]
+}
