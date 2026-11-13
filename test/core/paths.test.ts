@@ -24,7 +24,7 @@ describe('paths', () => {
   it('paths with spaces round-trip', () => {
     delete process.env.TOKEN_TRACKER_HOME;
     delete process.env.CLAUDE_CONFIG_DIR;
-    const home = 'C:\Users\Jane Doe';
+    const home = 'C:\\Users\\Jane Doe';
     const j = process.platform === 'win32' ? win32.join : join;
     expect(dataHome(home)).toBe(j(home, '.claude', 'token-tracker'));
     expect(projectsRoot(home)).toBe(j(home, '.claude', 'projects'));
