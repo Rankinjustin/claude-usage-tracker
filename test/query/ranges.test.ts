@@ -13,6 +13,9 @@ describe('resolveRange', () => {
     // 23:30 local the day before is still "yesterday", not today
     const late = resolveRange({ preset: 'today' }, new Date('2026-11-13T05:30:00Z'));
     expect(late.from).toBe('2026-11-12T06:00:00.000Z');
+    // same module, new zone: Tokyo (UTC+9) midnight is 15:00Z the day before
+    process.env.TZ = 'Asia/Tokyo';
+    expect(resolveRange({ preset: 'today' }, now).from).toBe('2026-11-12T15:00:00.000Z');
   });
 
   it('week range is last 7 days incl. today', () => {

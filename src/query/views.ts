@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { stateFile } from '../core/paths';
 import type { Range } from '../core/types';
 import type { Db } from '../store/db';
 import { resolveRange } from './ranges';
@@ -98,8 +100,8 @@ function advisorTokens(json: string): Record<string, number> {
 }
 
 /** One-sentence summary naming the largest cost group. */
-function takeaway(parts: Record<string, number>, total: number, calls: number): string {
-  if (calls === 0) return 'No usage recorded yet.';
+function takeaway(parts: Record<string, number>, total: number, calls: number, storeHasCalls: boolean): string {
+  if (calls === 0) return storeHasCalls ? 'No usage in this period.' : 'No usage recorded yet.';
   if (total <= 0) return 'No priced usage in this range.';
   const groups: [string, number][] = [
     ['Cache reads and writes', parts.cacheRead + parts.cacheWrite5m + parts.cacheWrite1h],
@@ -185,7 +187,8 @@ export function overview(db: Db, r: Range, now?: Date) {
     }),
     subagentPct: pct(agentCost, total),
     mainAvgCtx: mainCalls ? Math.round(mainCtx / mainCalls) : 0,
-    takeaway: takeaway(cost, total, rows.length),
+    takeaway: takeaway(cost, total, rows.length,
+      rows.length > 0 || all(db, 'SELECT 1 FROM api_calls LIMIT 1').length > 0),
   };
 }
 
@@ -196,7 +199,12 @@ interface RunInfo extends RunRow {
 }
 
 /** Every run with calls, with whole-run stats and the flag (cost vs the same type's previous runs). */
-function allRuns(db: Db): RunInfo[] {
+function allRuns(db: Db, activeSince?: string): RunInfo[] {
+  // activeSince limits work to agent types with calls since then (their history still feeds the medians).
+  const scope = activeSince
+    ? `WHERE r.agent_type IN (SELECT r2.agent_type FROM runs r2 JOIN api_calls c2 ON c2.run_id = r2.id
+        WHERE c2.ts >= ? AND r2.agent_type <> 'main')`
+    : '';
   const rows = all(db, `${WITH_CALLS}
     SELECT r.id, r.agent_type, r.description, r.session_id, MIN(k.ts) AS start, MAX(k.ts) AS last_call,
       (SELECT MAX(t.ended_ts) FROM tool_calls t WHERE t.run_id = r.id) AS last_tool,
@@ -206,7 +214,8 @@ function allRuns(db: Db): RunInfo[] {
       rpf.prompt_uuid AS prompt_uuid, p.text AS prompt_text
     FROM runs r JOIN calls k ON k.run_id = r.id LEFT JOIN rpf ON rpf.run_id = r.id
       LEFT JOIN prompts p ON p.uuid = rpf.prompt_uuid
-    GROUP BY r.id ORDER BY start, r.id`);
+    ${scope}
+    GROUP BY r.id ORDER BY start, r.id`, ...(activeSince ? [activeSince] : []));
   const prior = new Map<string, number[]>();
   return rows.map((x): RunInfo => {
     let flagged = false;
@@ -241,7 +250,10 @@ function sessionRows(db: Db, from: string, to: string, id?: string): SessionSumm
     FROM sessions s JOIN calls k ON k.session_id = s.id WHERE k.ts >= ? AND k.ts < ? ${idSql}
     GROUP BY s.id ORDER BY s.first_ts DESC`, ...params);
   const startCtx = new Map<string, number>();
-  for (const c of all(db, `${WITH_CALLS} SELECT session_id, ctx_tokens FROM calls WHERE is_main ORDER BY ts`)) {
+  const ids = rows.map((s) => s.id as string);
+  const firstCalls = ids.length === 0 ? [] : all(db, `${WITH_CALLS} SELECT session_id, ctx_tokens FROM calls
+    WHERE is_main AND session_id IN (${ids.map(() => '?').join(',')}) ORDER BY ts`, ...ids);
+  for (const c of firstCalls) {
     if (!startCtx.has(c.session_id)) startCtx.set(c.session_id, c.ctx_tokens);
   }
   const compactions = new Map<string, number>();
@@ -365,20 +377,22 @@ export function promptDetail(db: Db, uuid: string) {
 
 export function agents(db: Db, r: Range, now?: Date): AgentStats[] {
   const rg = resolveRange(r, now);
-  const runs = allRuns(db).filter((x) => x.start >= rg.from && x.start < rg.to);
-  const grandTotal = runs.reduce((a, x) => a + x.cost, 0);
-  const byType = new Map<string, RunInfo[]>();
-  for (const x of runs) byType.set(x.agentType, [...(byType.get(x.agentType) ?? []), x]);
-  return [...byType.entries()].map(([type, xs]): AgentStats => {
-    const cost = xs.reduce((a, x) => a + x.cost, 0);
-    const calls = xs.reduce((a, x) => a + x.calls, 0);
-    const toolN = xs.reduce((a, x) => a + x.toolCalls, 0);
+  // Cost, calls and context come from calls inside the range, so a long-lived main thread only counts
+  // what was spent in it and the rows reconcile with overview(). Flags, durations and errors go by run start.
+  const agg = all(db, `${WITH_CALLS} SELECT agent_type, COUNT(DISTINCT run_id) AS runs, COUNT(*) AS calls,
+      SUM(${CALL_COST}) AS cost, SUM(ctx_tokens) AS ctx_sum FROM calls WHERE ts >= ? AND ts < ? GROUP BY agent_type`,
+  rg.from, rg.to);
+  const started = allRuns(db).filter((x) => x.start >= rg.from && x.start < rg.to);
+  const grandTotal = agg.reduce((a, x) => a + x.cost, 0);
+  return agg.map((x): AgentStats => {
+    const xs = started.filter((run) => run.agentType === x.agent_type);
+    const toolN = xs.reduce((a, run) => a + run.toolCalls, 0);
     return {
-      type, kind: agentKind(type), runs: xs.length, calls, cost, pct: pct(cost, grandTotal),
-      perRun: cost / xs.length, avgCtx: calls ? Math.round(xs.reduce((a, x) => a + x.ctxSum, 0) / calls) : 0,
-      avgDurationMs: xs.reduce((a, x) => a + x.durationMs, 0) / xs.length,
-      errorRate: pct(xs.reduce((a, x) => a + x.toolErrors, 0), toolN),
-      sparkline: xs.slice(-SPARK_RUNS).map((x) => x.cost), flaggedRuns: xs.filter((x) => x.flagged).length,
+      type: x.agent_type, kind: agentKind(x.agent_type), runs: x.runs, calls: x.calls, cost: x.cost,
+      pct: pct(x.cost, grandTotal), perRun: x.cost / x.runs, avgCtx: Math.round(x.ctx_sum / x.calls),
+      avgDurationMs: xs.length ? xs.reduce((a, run) => a + run.durationMs, 0) / xs.length : 0,
+      errorRate: pct(xs.reduce((a, run) => a + run.toolErrors, 0), toolN),
+      sparkline: xs.slice(-SPARK_RUNS).map((run) => run.cost), flaggedRuns: xs.filter((run) => run.flagged).length,
     };
   }).sort((a, b) => b.cost - a.cost);
 }
@@ -395,6 +409,21 @@ export function agentDetail(db: Db, type: string, r: Range, now?: Date) {
 
 // ---- coverage and status line ----
 
+/** installed.json in the data home records the install time; unreadable or absent means unknown. */
+function installedAt(): string | null {
+  try {
+    const f = stateFile('installed.json');
+    if (!existsSync(f)) return null;
+    const v = (JSON.parse(readFileSync(f, 'utf8')) as { installedAt?: unknown }).installedAt;
+    return typeof v === 'string' ? v : null;
+  } catch { return null; }
+}
+
+/**
+ * Index coverage. `sessionsPartial` = sessions with at least one transcript file that disappeared after it was
+ * indexed (their rows are kept, the history may be incomplete). `filesMissingBeforeIndexed` = transcript files that
+ * disappeared after being seen; their rows are kept.
+ */
 export function coverage(db: Db) {
   const n = (sql: string): number => all(db, sql)[0].n as number;
   const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE missing = 1 AND session_id IS NOT NULL`);
@@ -402,7 +431,7 @@ export function coverage(db: Db) {
   try { progress = JSON.parse(db.meta.get('backfill_progress') ?? 'null'); } catch { /* unreadable: treat as none */ }
   const started = (progress as { startedAt?: string } | null)?.startedAt ?? null;
   return {
-    installedAt: db.meta.get('installed_at') ?? started,
+    installedAt: installedAt() ?? started,
     sessionsComplete: n('SELECT COUNT(*) AS n FROM sessions') - sessionsPartial,
     sessionsPartial,
     filesMissingBeforeIndexed: n('SELECT COUNT(*) AS n FROM files WHERE missing = 1'),
@@ -416,6 +445,6 @@ export function statusLine(db: Db, sessionId: string, now?: Date) {
     rg.from, rg.to)[0].c as number;
   const session = all(db, `${WITH_CALLS} SELECT COALESCE(SUM(${CALL_COST}), 0) AS c FROM calls WHERE session_id = ?`,
     sessionId)[0].c as number;
-  const alerts = allRuns(db).filter((x) => x.flagged && x.start >= rg.from && x.start < rg.to).length;
+  const alerts = allRuns(db, rg.from).filter((x) => x.flagged && x.start >= rg.from && x.start < rg.to).length;
   return { today, session, alerts };
 }

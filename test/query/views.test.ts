@@ -1,7 +1,7 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { indexAll } from '../../src/ingest/indexer';
 import {
   agentDetail, agents, coverage, overview, promptDetail, prompts, sessionDetail, sessions, statusLine,
@@ -15,7 +15,14 @@ const ALL = { preset: 'all' } as const;
 
 const dirs: string[] = [];
 const dbs: Db[] = [];
+const realHome = process.env.TOKEN_TRACKER_HOME;
+beforeEach(() => { // never read the developer's real data home
+  const h = mkdtempSync(join(tmpdir(), 'tt home '));
+  dirs.push(h);
+  process.env.TOKEN_TRACKER_HOME = h;
+});
 afterEach(() => {
+  if (realHome === undefined) delete process.env.TOKEN_TRACKER_HOME; else process.env.TOKEN_TRACKER_HOME = realHome;
   while (dbs.length) dbs.pop()!.close();
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
@@ -238,5 +245,55 @@ describe('views over hand-built data', () => {
     call(db, { session: 's1', run: 'main:s1', prompt: 'p1', ts: '2026-11-10T15:00:01.000Z', cost: 4,
       parts: { output: 1, cacheRead: 2, cacheWrite5m: 1 } });
     expect(overview(db, ALL).takeaway).toBe('Cache reads and writes were 75% of spend.');
+  });
+
+  it('agents reconcile with overview for a main session spanning two local days', () => {
+    const db = freshDb();
+    seedSession(db, 's1', [{ uuid: 'p1', ts: '2026-11-10T15:00:00.000Z', text: 'old' },
+      { uuid: 'p2', ts: '2026-11-12T15:00:00.000Z', text: 'new' }]);
+    call(db, { session: 's1', run: 'main:s1', prompt: 'p1', ts: '2026-11-10T15:00:01.000Z', cost: 10 });
+    call(db, { session: 's1', run: 'main:s1', prompt: 'p2', ts: '2026-11-12T15:00:01.000Z', cost: 1, tools: ['tu1'] });
+    const sub = addAgentRun(db, 's1', 'Explore', 1, 'tu1');
+    call(db, { session: 's1', run: sub, ts: '2026-11-12T15:00:02.000Z', cost: 2 });
+    const now = new Date('2026-11-12T18:00:00Z');
+    const rows = agents(db, { preset: 'today' }, now);
+    expect(rows.find((a) => a.type === 'main')!.cost).toBeCloseTo(1);
+    expect(rows.find((a) => a.type === 'main')!.runs).toBe(1);
+    expect(rows.reduce((a, x) => a + x.cost, 0)).toBeCloseTo(overview(db, { preset: 'today' }, now).total);
+    expect(rows.reduce((a, x) => a + x.pct, 0)).toBeCloseTo(100);
+    expect(agents(db, ALL).find((a) => a.type === 'main')!.cost).toBeCloseTo(11);
+  });
+
+  it('coverage reads installedAt from installed.json, falling back to backfill start', () => {
+    const db = freshDb();
+    expect(coverage(db).installedAt).toBeNull();
+    db.meta.set('backfill_progress', JSON.stringify({ done: 1, total: 1, startedAt: '2026-11-01T00:00:00.000Z' }));
+    expect(coverage(db).installedAt).toBe('2026-11-01T00:00:00.000Z');
+    writeFileSync(join(process.env.TOKEN_TRACKER_HOME!, 'installed.json'), JSON.stringify({ installedAt: '2026-10-20T12:00:00.000Z' }));
+    expect(coverage(db).installedAt).toBe('2026-10-20T12:00:00.000Z');
+    writeFileSync(join(process.env.TOKEN_TRACKER_HOME!, 'installed.json'), '{not json');
+    expect(coverage(db).installedAt).toBe('2026-11-01T00:00:00.000Z');
+  });
+
+  it('overview parts sum to total with advisor and an unpriced call together', () => {
+    const db = freshDb();
+    seedSession(db, 's1', [{ uuid: 'p1', ts: '2026-11-10T15:00:00.000Z', text: 'go' }]);
+    call(db, { session: 's1', run: 'main:s1', prompt: 'p1', ts: '2026-11-10T15:00:01.000Z', cost: 1, advisor: 0.5 });
+    call(db, { session: 's1', run: 'main:s1', prompt: 'p1', ts: '2026-11-10T15:00:02.000Z', cost: null, model: 'mystery-9' });
+    const o = overview(db, ALL);
+    expect(o.unpricedCalls).toBe(1);
+    expect(o.total).toBeCloseTo(1.5);
+    expect(o.parts.reduce((a, p) => a + p.cost, 0)).toBeCloseTo(o.total);
+  });
+
+  it('statusLine today splits at local midnight; empty range with data says so', () => {
+    const db = freshDb();
+    seedSession(db, 's1', [{ uuid: 'p1', ts: '2026-11-11T05:30:00.000Z', text: 'go' }]);
+    call(db, { session: 's1', run: 'main:s1', prompt: 'p1', ts: '2026-11-11T05:30:00.000Z', cost: 1 }); // 23:30 local Nov 10
+    call(db, { session: 's1', run: 'main:s1', prompt: 'p1', ts: '2026-11-11T06:30:00.000Z', cost: 2 }); // 00:30 local Nov 11
+    const s = statusLine(db, 's1', new Date('2026-11-11T12:00:00Z'));
+    expect(s.today).toBeCloseTo(2);
+    expect(s.session).toBeCloseTo(3);
+    expect(overview(db, { preset: 'today' }, new Date('2026-12-25T12:00:00Z')).takeaway).toBe('No usage in this period.');
   });
 });
