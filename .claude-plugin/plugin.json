@@ -1,0 +1,7 @@
+{
+  "name": "token-tracker",
+  "displayName": "Token Tracker",
+  "version": "0.1.0",
+  "description": "Records your Claude Code token spend and shows it in a live local dashboard.",
+  "license": "MIT"
+}
