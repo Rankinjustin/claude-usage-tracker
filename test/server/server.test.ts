@@ -3,6 +3,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
+import { withWriteLockAsync } from '../../src/ingest/lock';
 import { startServer, type RunningServer } from '../../src/server/server';
 
 let home: string;
@@ -102,16 +103,11 @@ test('invalid range is a 400 JSON error', async () => {
 });
 
 test('path traversal cannot escape the ui directory', async () => {
-  const s = await start();
-  for (const p of ['/..%2f..%2fpackage.json', '/%2e%2e/%2e%2e/package.json', '/..%5c..%5cpackage.json']) {
-    const status = await raw(s.port, p, { ...auth(s), Host: `127.0.0.1:${s.port}` });
-    expect([403, 404, 200]).toContain(status);
-    if (status === 200) {
-      const res = await fetch(u(s, p), { headers: auth(s) });
-      expect(await res.text()).not.toContain('"name": "token-tracker"');
-    }
+  for (const p of ['/..%2f..%2fpackage.json', '/%2e%2e%2f%2e%2e%2fpackage.json', '/..%5c..%5cpackage.json',
+    '/assets/..%2f..%2f..%2fpackage.json']) {
+    const s = srv ?? (await start());
+    expect(await raw(s.port, p, auth(s)), p).toBe(403);
   }
-  expect(await raw(s.port, '/..%2f..%2fpackage.json', auth(s))).toBe(403);
 });
 
 test('unknown API paths are 404 and unknown ids are 404', async () => {
@@ -174,4 +170,29 @@ test('server.json removed on close', async () => {
   expect(existsSync(join(home, 'server.json'))).toBe(true);
   await s.close();
   expect(existsSync(join(home, 'server.json'))).toBe(false);
+});
+
+test('server answers requests while another process holds the lock', async () => {
+  const s = await start();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const held = withWriteLockAsync(() => gate);
+  mkdirSync(join(root, 'proj'));
+  copyFileSync('test/fixtures/agent.jsonl', join(root, 'proj', 'sess.jsonl'));
+  await new Promise((r) => setTimeout(r, 400)); // watcher fires and finds the lock busy
+  const t0 = Date.now();
+  expect((await fetch(u(s, '/api/coverage'), { headers: auth(s) })).status).toBe(200);
+  expect(Date.now() - t0).toBeLessThan(300);
+  const poke = await fetch(u(s, '/api/poke'), { method: 'POST', headers: auth(s) });
+  expect(poke.status).toBe(202);
+  expect(await poke.json()).toMatchObject({ indexed: false, queued: true });
+  release();
+  await held;
+  const deadline = Date.now() + 5000;
+  let n = 0;
+  while (n === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    n = (await (await fetch(u(s, '/api/sessions?range=all'), { headers: auth(s) })).json()).length;
+  }
+  expect(n).toBeGreaterThan(0);
 });

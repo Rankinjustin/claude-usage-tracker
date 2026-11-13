@@ -1,9 +1,12 @@
 // src/server/server.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync5, readFileSync as readFileSync4, realpathSync, rmSync, statSync as statSync3, watch, writeFileSync } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync4, realpathSync, renameSync, rmSync, statSync as statSync3, watch, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, resolve as resolve2, sep as sep2 } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// src/core/log.ts
+import { appendFileSync } from "node:fs";
 
 // src/core/paths.ts
 import { execFileSync } from "node:child_process";
@@ -37,6 +40,16 @@ function ensureDataHome() {
   mkdirSync(dir, { recursive: true, mode: 448 });
   if (!existed && process.platform === "win32") restrictWindows(dir);
   return dir;
+}
+
+// src/core/log.ts
+function log(message) {
+  try {
+    ensureDataHome();
+    appendFileSync(stateFile("debug.log"), `${(/* @__PURE__ */ new Date()).toISOString()} ${message}
+`);
+  } catch {
+  }
 }
 
 // src/ingest/indexer.ts
@@ -333,24 +346,31 @@ function listTranscripts(root) {
   }
   return [...mains, ...subs];
 }
-function indexAll(db, opts = {}) {
-  const root = resolve(opts.root ?? projectsRoot());
-  const files = listTranscripts(root);
-  const out = empty();
-  files.forEach((f, i) => {
-    try {
-      add(out, indexFile(db, f));
-    } catch (e) {
-      out.failed++;
-      out.errors.push({ path: f, message: e instanceof Error ? e.message : String(e) });
-    }
-    opts.onProgress?.(i + 1, files.length);
-  });
+function indexOne(db, f, out) {
+  try {
+    add(out, indexFile(db, f));
+  } catch (e) {
+    out.failed++;
+    out.errors.push({ path: f, message: e instanceof Error ? e.message : String(e) });
+  }
+}
+function finishPass(db, root, files) {
   const seen = new Set(files);
   for (const p of db.presentFiles()) {
     if (p.startsWith(root + sep) && !seen.has(p)) db.markFileMissing(p);
   }
   db.resolveRunParents();
+}
+async function indexAllAsync(db, opts = {}) {
+  const root = resolve(opts.root ?? projectsRoot());
+  const files = listTranscripts(root);
+  const out = empty();
+  for (let i = 0; i < files.length; i++) {
+    indexOne(db, files[i], out);
+    opts.onProgress?.(i + 1, files.length);
+    await new Promise((r) => setImmediate(r));
+  }
+  finishPass(db, root, files);
   return out;
 }
 function indexFile(db, path, opts = {}) {
@@ -552,9 +572,6 @@ function upsertRunFor(db, p, isSub, sid, runId) {
 import { closeSync as closeSync2, openSync as openSync2, readFileSync as readFileSync2, statSync as statSync2, unlinkSync, writeSync } from "node:fs";
 import { join as join3 } from "node:path";
 var STALE_MS = 10 * 60 * 1e3;
-var sleep = (ms) => {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-};
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -611,16 +628,12 @@ function tryAcquire(path) {
   }
   return false;
 }
-function withWriteLock(fn, opts = {}) {
+async function withWriteLockAsync(fn) {
   ensureDataHome();
   const path = join3(dataHome(), "write.lock");
-  const deadline = Date.now() + (opts.waitMs ?? 0);
-  while (!tryAcquire(path)) {
-    if (Date.now() >= deadline) return "busy";
-    sleep(50);
-  }
+  if (!tryAcquire(path)) return "busy";
   try {
-    return fn();
+    return await fn();
   } finally {
     try {
       unlinkSync(path);
@@ -1450,29 +1463,42 @@ async function startServer(opts = {}) {
   let lastActivity = Date.now();
   let port = 0;
   let closed = false;
-  function runIndex(waitMs) {
-    if (closed) return { indexed: false, changed: [] };
-    let changed;
-    try {
-      const r = withWriteLock(() => indexAll(db, { root }), { waitMs });
-      if (r === "busy") return { indexed: false, changed: [] };
-      changed = r.changedSessions;
-    } catch {
-      return { indexed: false, changed: [] };
-    }
-    if (changed.length) {
-      const msg = `data: ${JSON.stringify({ changed })}
-
-`;
-      for (const c of clients) c.write(msg);
-    }
-    return { indexed: true, changed };
-  }
+  let current;
   let debounce;
   const schedule = () => {
     clearTimeout(debounce);
-    debounce = setTimeout(() => runIndex(2e3), debounceMs);
+    debounce = setTimeout(() => {
+      void runIndex();
+    }, debounceMs);
   };
+  async function runIndex() {
+    const none = { indexed: false, changed: [], queued: false };
+    if (closed) return none;
+    if (current) await current;
+    if (closed) return none;
+    const pass = withWriteLockAsync(() => indexAllAsync(db, { root }));
+    current = pass;
+    try {
+      const r = await pass;
+      if (r === "busy") {
+        schedule();
+        return { ...none, queued: true };
+      }
+      if (r.failed) log(`server index: ${r.failed} file(s) failed: ${r.errors.map((e) => `${e.path}: ${e.message}`).join("; ")}`);
+      if (r.changedSessions.length) {
+        const msg = `data: ${JSON.stringify({ changed: r.changedSessions })}
+
+`;
+        for (const c of clients) c.write(msg);
+      }
+      return { indexed: true, changed: r.changedSessions, queued: false };
+    } catch (e) {
+      log(`server index failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      return none;
+    } finally {
+      if (current === pass) current = void 0;
+    }
+  }
   let watcher;
   let poll;
   const startPolling = () => {
@@ -1565,8 +1591,11 @@ async function startServer(opts = {}) {
     const cookie = viaQuery ? { "Set-Cookie": `tt_key=${key}; HttpOnly; SameSite=Strict; Path=/` } : {};
     if (url.pathname === "/api/poke") {
       if (req.method !== "POST") throw new HttpError(405, "method not allowed");
-      const r = runIndex(1e3);
-      return sendJson(res, 200, { ok: true, indexed: r.indexed, changed: r.changed });
+      void runIndex().then(
+        (r) => r.queued ? sendJson(res, 202, { ok: true, indexed: false, queued: true }) : sendJson(res, 200, { ok: true, indexed: r.indexed, changed: r.changed }),
+        () => sendJson(res, 500, { error: "internal error" })
+      );
+      return;
     }
     if (url.pathname === "/api/events") {
       if (req.method !== "GET") throw new HttpError(405, "method not allowed");
@@ -1635,15 +1664,18 @@ async function startServer(opts = {}) {
       process.off("exit", onExit);
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
+      process.off("SIGHUP", onSignal);
       removeServerFile();
       for (const c of clients) c.end();
       clients.clear();
       server.close(() => {
-        try {
-          db.close();
-        } catch {
-        }
-        done();
+        void Promise.resolve(current).catch(() => void 0).then(() => {
+          try {
+            db.close();
+          } catch {
+          }
+          done();
+        });
       });
       server.closeAllConnections();
     });
@@ -1654,19 +1686,25 @@ async function startServer(opts = {}) {
     server.listen(opts.port ?? 0, "127.0.0.1", () => ok());
   });
   port = server.address().port;
+  const tmpFile = `${serverFile}.tmp`;
   writeFileSync(
-    serverFile,
+    tmpFile,
     JSON.stringify({ pid: process.pid, port, key, startedAt: (/* @__PURE__ */ new Date()).toISOString() }),
     { mode: 384 }
   );
+  renameSync(tmpFile, serverFile);
+  server.on("error", (e) => log(`server error: ${e instanceof Error ? e.message : String(e)}`));
   process.on("exit", onExit);
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
+  process.on("SIGHUP", onSignal);
   idleTimer = setInterval(() => {
     if (clients.size === 0 && Date.now() - lastActivity >= idleMs) void close().then(() => opts.onClosed?.());
   }, Math.max(20, Math.min(1e3, idleMs / 4)));
   idleTimer.unref();
-  setTimeout(() => runIndex(2e3), 0);
+  setTimeout(() => {
+    void runIndex();
+  }, 0);
   return { url: `http://127.0.0.1:${port}/?key=${key}`, port, key, close };
 }
 export {

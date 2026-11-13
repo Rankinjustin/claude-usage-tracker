@@ -1,12 +1,13 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { type FSWatcher, existsSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
+import { type FSWatcher, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { log } from '../core/log';
 import { dbPath as defaultDbPath, ensureDataHome, projectsRoot, stateFile } from '../core/paths';
 import type { Range } from '../core/types';
-import { indexAll } from '../ingest/indexer';
-import { withWriteLock } from '../ingest/lock';
+import { indexAllAsync } from '../ingest/indexer';
+import { withWriteLockAsync } from '../ingest/lock';
 import {
   agentDetail, agents, coverage, overview, promptDetail, prompts, sessionDetail, sessions,
 } from '../query/views';
@@ -82,29 +83,43 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
   let port = 0;
   let closed = false;
 
-  /** Indexes under the write lock and tells SSE clients which sessions changed. */
-  function runIndex(waitMs: number): { indexed: boolean; changed: string[] } {
-    if (closed) return { indexed: false, changed: [] };
-    let changed: string[];
-    try {
-      const r = withWriteLock(() => indexAll(db, { root }), { waitMs });
-      if (r === 'busy') return { indexed: false, changed: [] };
-      changed = r.changedSessions;
-    } catch {
-      return { indexed: false, changed: [] };
-    }
-    if (changed.length) {
-      const msg = `data: ${JSON.stringify({ changed })}\n\n`;
-      for (const c of clients) c.write(msg);
-    }
-    return { indexed: true, changed };
-  }
-
+  let current: Promise<unknown> | undefined;
   let debounce: NodeJS.Timeout | undefined;
+  /** Coalesces change bursts and lock-busy retries into one pending pass. */
   const schedule = (): void => {
     clearTimeout(debounce);
-    debounce = setTimeout(() => runIndex(2000), debounceMs);
+    debounce = setTimeout(() => { void runIndex(); }, debounceMs);
   };
+
+  /**
+   * Indexes under the write lock without blocking the event loop and tells SSE clients which sessions
+   * changed. When another process holds the lock (e.g. the first-run backfill) it retries later.
+   */
+  async function runIndex(): Promise<{ indexed: boolean; changed: string[]; queued: boolean }> {
+    const none = { indexed: false, changed: [] as string[], queued: false };
+    if (closed) return none;
+    if (current) await current;
+    if (closed) return none;
+    const pass = withWriteLockAsync(() => indexAllAsync(db, { root }));
+    current = pass;
+    try {
+      const r = await pass;
+      if (r === 'busy') { schedule(); return { ...none, queued: true }; }
+      if (r.failed) log(`server index: ${r.failed} file(s) failed: ${r.errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`);
+      if (r.changedSessions.length) {
+        const msg = `data: ${JSON.stringify({ changed: r.changedSessions })}
+
+`;
+        for (const c of clients) c.write(msg);
+      }
+      return { indexed: true, changed: r.changedSessions, queued: false };
+    } catch (e) {
+      log(`server index failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+      return none;
+    } finally {
+      if (current === pass) current = undefined;
+    }
+  }
 
   let watcher: FSWatcher | undefined;
   let poll: NodeJS.Timeout | undefined;
@@ -189,8 +204,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
 
     if (url.pathname === '/api/poke') {
       if (req.method !== 'POST') throw new HttpError(405, 'method not allowed');
-      const r = runIndex(1000);
-      return sendJson(res, 200, { ok: true, indexed: r.indexed, changed: r.changed });
+      void runIndex().then(
+        (r) => r.queued
+          ? sendJson(res, 202, { ok: true, indexed: false, queued: true })
+          : sendJson(res, 200, { ok: true, indexed: r.indexed, changed: r.changed }),
+        () => sendJson(res, 500, { error: 'internal error' }),
+      );
+      return;
     }
     if (url.pathname === '/api/events') {
       if (req.method !== 'GET') throw new HttpError(405, 'method not allowed');
@@ -245,10 +265,16 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
       process.off('exit', onExit);
       process.off('SIGINT', onSignal);
       process.off('SIGTERM', onSignal);
+      process.off('SIGHUP', onSignal);
       removeServerFile();
       for (const c of clients) c.end();
       clients.clear();
-      server.close(() => { try { db.close(); } catch { /* already closed */ } done(); });
+      server.close(() => {
+        void Promise.resolve(current).catch(() => undefined).then(() => {
+          try { db.close(); } catch { /* already closed */ }
+          done();
+        });
+      });
       server.closeAllConnections();
     });
     return closing;
@@ -259,18 +285,22 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
     server.listen(opts.port ?? 0, '127.0.0.1', () => ok());
   });
   port = (server.address() as { port: number }).port;
-  writeFileSync(serverFile, JSON.stringify({ pid: process.pid, port, key, startedAt: new Date().toISOString() }),
+  const tmpFile = `${serverFile}.tmp`;
+  writeFileSync(tmpFile, JSON.stringify({ pid: process.pid, port, key, startedAt: new Date().toISOString() }),
     { mode: 0o600 });
+  renameSync(tmpFile, serverFile);
+  server.on('error', (e) => log(`server error: ${e instanceof Error ? e.message : String(e)}`));
   process.on('exit', onExit);
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
+  process.on('SIGHUP', onSignal);
 
   idleTimer = setInterval(() => {
     if (clients.size === 0 && Date.now() - lastActivity >= idleMs) void close().then(() => opts.onClosed?.());
   }, Math.max(20, Math.min(1000, idleMs / 4)));
   idleTimer.unref();
 
-  setTimeout(() => runIndex(2000), 0);
+  setTimeout(() => { void runIndex(); }, 0);
 
   return { url: `http://127.0.0.1:${port}/?key=${key}`, port, key, close };
 }

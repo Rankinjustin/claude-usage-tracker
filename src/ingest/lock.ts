@@ -83,3 +83,18 @@ export function withWriteLock<T>(fn: () => T, opts: { waitMs?: number } = {}): T
     try { unlinkSync(path); } catch { /* already gone */ }
   }
 }
+
+/**
+ * Async twin of withWriteLock for passes that yield to the event loop while holding the lock.
+ * Never blocks the loop: when the lock is held it returns 'busy' immediately.
+ */
+export async function withWriteLockAsync<T>(fn: () => Promise<T>): Promise<T | 'busy'> {
+  ensureDataHome();
+  const path = join(dataHome(), 'write.lock');
+  if (!tryAcquire(path)) return 'busy';
+  try {
+    return await fn();
+  } finally {
+    try { unlinkSync(path); } catch { /* already gone */ }
+  }
+}

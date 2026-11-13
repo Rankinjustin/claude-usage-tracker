@@ -62,29 +62,53 @@ function listTranscripts(root: string): string[] {
   return [...mains, ...subs];
 }
 
-/** Indexes every transcript under the root and marks vanished ones missing. */
-export function indexAll(
-  db: Db, opts: { root?: string; onProgress?: (done: number, total: number) => void } = {},
-): IndexResult {
-  const root = resolve(opts.root ?? projectsRoot());
-  const files = listTranscripts(root);
-  const out = empty();
-  files.forEach((f, i) => {
-    try {
-      add(out, indexFile(db, f));
-    } catch (e) {
-      // One bad file (locked, vanished mid-read, db error) must not stop the rest of the pass.
-      out.failed++;
-      out.errors.push({ path: f, message: e instanceof Error ? e.message : String(e) });
-    }
-    opts.onProgress?.(i + 1, files.length);
-  });
+type ProgressOpts = { root?: string; onProgress?: (done: number, total: number) => void };
+
+/** Indexes one file, folding a thrown error into the result so the pass can continue. */
+function indexOne(db: Db, f: string, out: IndexResult): void {
+  try {
+    add(out, indexFile(db, f));
+  } catch (e) {
+    // One bad file (locked, vanished mid-read, db error) must not stop the rest of the pass.
+    out.failed++;
+    out.errors.push({ path: f, message: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** End of a pass: vanished transcripts are marked missing and orphaned subagents get their parents. */
+function finishPass(db: Db, root: string, files: string[]): void {
   const seen = new Set(files);
   for (const p of db.presentFiles()) {
     if (p.startsWith(root + sep) && !seen.has(p)) db.markFileMissing(p);
   }
   // A subagent indexed before the file holding its launching tool call gets its parent now.
   db.resolveRunParents();
+}
+
+/** Indexes every transcript under the root and marks vanished ones missing. */
+export function indexAll(db: Db, opts: ProgressOpts = {}): IndexResult {
+  const root = resolve(opts.root ?? projectsRoot());
+  const files = listTranscripts(root);
+  const out = empty();
+  files.forEach((f, i) => {
+    indexOne(db, f, out);
+    opts.onProgress?.(i + 1, files.length);
+  });
+  finishPass(db, root, files);
+  return out;
+}
+
+/** Same as indexAll but yields to the event loop between files, so a server stays responsive. */
+export async function indexAllAsync(db: Db, opts: ProgressOpts = {}): Promise<IndexResult> {
+  const root = resolve(opts.root ?? projectsRoot());
+  const files = listTranscripts(root);
+  const out = empty();
+  for (let i = 0; i < files.length; i++) {
+    indexOne(db, files[i]!, out);
+    opts.onProgress?.(i + 1, files.length);
+    await new Promise<void>((r) => setImmediate(r));
+  }
+  finishPass(db, root, files);
   return out;
 }
 

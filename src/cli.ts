@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { log } from './core/log';
 import { dbPath, ensureDataHome, stateFile } from './core/paths';
 import { pidAlive, withWriteLock } from './ingest/lock';
 
@@ -13,15 +14,6 @@ function nodeTooOld(version: string): boolean {
     if ((v[i] ?? 0) !== MIN_NODE[i]) return (v[i] ?? 0) < MIN_NODE[i];
   }
   return false;
-}
-
-function log(message: string): void {
-  try {
-    ensureDataHome();
-    appendFileSync(stateFile('debug.log'), `${new Date().toISOString()} ${message}\n`);
-  } catch {
-    // Logging must never fail the session.
-  }
 }
 
 const errText = (e: unknown): string => (e instanceof Error ? (e.stack ?? e.message) : String(e));
