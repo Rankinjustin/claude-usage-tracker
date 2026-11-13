@@ -1,6 +1,7 @@
 ---
 description: Set up the Token Tracker status line
 disable-model-invocation: true
+allowed-tools: Bash(node:*)
 ---
 
 Current setup status:

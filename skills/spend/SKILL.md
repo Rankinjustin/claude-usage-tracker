@@ -1,10 +1,11 @@
 ---
 description: Open the Token Tracker dashboard
 disable-model-invocation: true
+allowed-tools: Bash(node:*)
 ---
 
 Dashboard launcher output:
 
 !`node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" open`
 
-Show the user the URL printed above and nothing else.
+Reply with only the line printed above, exactly as printed.

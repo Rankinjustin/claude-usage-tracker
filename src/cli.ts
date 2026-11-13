@@ -122,6 +122,78 @@ const summary = (r: import('./ingest/indexer').IndexResult): string =>
   `indexed ${r.files} files, ${r.newCalls} new calls, ${r.newPrompts} new prompts` +
   (r.failed ? `, ${r.failed} failed` : '');
 
+interface ServerInfo { pid: number; port: number; key: string; startedAt: string }
+
+/** Reads server.json; null when missing, partial or malformed. */
+function readServerInfo(): ServerInfo | null {
+  try {
+    const file = stateFile('server.json');
+    if (!existsSync(file)) return null;
+    const i = JSON.parse(readFileSync(file, 'utf8')) as Partial<ServerInfo>;
+    if (typeof i.pid !== 'number' || typeof i.port !== 'number' || typeof i.key !== 'string') return null;
+    return { pid: i.pid, port: i.port, key: i.key, startedAt: String(i.startedAt ?? '') };
+  } catch { return null; }
+}
+
+/** A server is live when its pid exists and it answers an authenticated request within a second. */
+async function serverLive(i: ServerInfo): Promise<boolean> {
+  if (!pidAlive(i.pid)) return false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${i.port}/api/coverage`, {
+      headers: { Authorization: `Bearer ${i.key}` },
+      signal: AbortSignal.timeout(1000),
+    });
+    return res.status === 200;
+  } catch { return false; }
+}
+
+/** Starts a detached server and waits up to 5 s for it to publish a fresh server.json. */
+async function startDetachedServer(): Promise<ServerInfo | null> {
+  const since = Date.now();
+  const cli = fileURLToPath(import.meta.url);
+  spawn(process.execPath, [cli, 'serve'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  while (Date.now() - since < 5000) {
+    await new Promise((r) => setTimeout(r, 100));
+    const i = readServerInfo();
+    if (i && Date.parse(i.startedAt) >= since) break;
+  }
+  const i = readServerInfo();
+  return i && Date.parse(i.startedAt) >= since && (await serverLive(i)) ? i : null;
+}
+
+/** Opens the URL in the default browser; never throws. TOKEN_TRACKER_NO_BROWSER only logs it (tests). */
+function openBrowser(url: string): void {
+  if (process.env.TOKEN_TRACKER_NO_BROWSER) {
+    log(`browser open skipped: ${url}`);
+    return;
+  }
+  try {
+    // `start` takes the first quoted argument as a window title, so one is supplied.
+    const [cmd, args]: [string, string[]] =
+      process.platform === 'win32' ? ['cmd', ['/c', 'start', 'Token Tracker', url]]
+        : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+    const child = spawn(cmd, args, { windowsHide: true, detached: true, stdio: 'ignore' });
+    child.on('error', (e) => log(`browser open failed: ${errText(e)}`));
+    child.unref();
+  } catch (e) {
+    log(`browser open failed: ${errText(e)}`);
+  }
+}
+
+/** Finds or starts the server, opens the browser and prints the dashboard URL. */
+async function openDashboard(): Promise<void> {
+  ensureDataHome();
+  let info = readServerInfo();
+  if (!info || !(await serverLive(info))) info = await startDetachedServer();
+  if (!info) {
+    console.log(`Token Tracker could not start its local server; see ${stateFile('debug.log')}`);
+    return;
+  }
+  const url = `http://127.0.0.1:${info.port}/?key=${info.key}`;
+  openBrowser(url);
+  console.log(`Token Tracker: ${url}`);
+}
+
 async function run(sub: string): Promise<void> {
   switch (sub) {
     case 'hook-start':
@@ -166,6 +238,9 @@ async function run(sub: string): Promise<void> {
       });
       return;
     }
+    case 'open':
+      await openDashboard();
+      return;
     default:
       console.error(`token-tracker: unknown command "${sub}"`);
   }

@@ -1955,6 +1955,67 @@ async function indexLocked(fn, waitMs) {
   return r !== "busy";
 }
 var summary = (r) => `indexed ${r.files} files, ${r.newCalls} new calls, ${r.newPrompts} new prompts` + (r.failed ? `, ${r.failed} failed` : "");
+function readServerInfo() {
+  try {
+    const file = stateFile("server.json");
+    if (!existsSync6(file)) return null;
+    const i = JSON.parse(readFileSync5(file, "utf8"));
+    if (typeof i.pid !== "number" || typeof i.port !== "number" || typeof i.key !== "string") return null;
+    return { pid: i.pid, port: i.port, key: i.key, startedAt: String(i.startedAt ?? "") };
+  } catch {
+    return null;
+  }
+}
+async function serverLive(i) {
+  if (!pidAlive(i.pid)) return false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${i.port}/api/coverage`, {
+      headers: { Authorization: `Bearer ${i.key}` },
+      signal: AbortSignal.timeout(1e3)
+    });
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+async function startDetachedServer() {
+  const since = Date.now();
+  const cli = fileURLToPath2(import.meta.url);
+  spawn(process.execPath, [cli, "serve"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+  while (Date.now() - since < 5e3) {
+    await new Promise((r) => setTimeout(r, 100));
+    const i2 = readServerInfo();
+    if (i2 && Date.parse(i2.startedAt) >= since) break;
+  }
+  const i = readServerInfo();
+  return i && Date.parse(i.startedAt) >= since && await serverLive(i) ? i : null;
+}
+function openBrowser(url) {
+  if (process.env.TOKEN_TRACKER_NO_BROWSER) {
+    log(`browser open skipped: ${url}`);
+    return;
+  }
+  try {
+    const [cmd, args] = process.platform === "win32" ? ["cmd", ["/c", "start", "Token Tracker", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
+    const child = spawn(cmd, args, { windowsHide: true, detached: true, stdio: "ignore" });
+    child.on("error", (e) => log(`browser open failed: ${errText(e)}`));
+    child.unref();
+  } catch (e) {
+    log(`browser open failed: ${errText(e)}`);
+  }
+}
+async function openDashboard() {
+  ensureDataHome();
+  let info = readServerInfo();
+  if (!info || !await serverLive(info)) info = await startDetachedServer();
+  if (!info) {
+    console.log(`Token Tracker could not start its local server; see ${stateFile("debug.log")}`);
+    return;
+  }
+  const url = `http://127.0.0.1:${info.port}/?key=${info.key}`;
+  openBrowser(url);
+  console.log(`Token Tracker: ${url}`);
+}
 async function run(sub) {
   switch (sub) {
     case "hook-start":
@@ -2006,6 +2067,9 @@ async function run(sub) {
       });
       return;
     }
+    case "open":
+      await openDashboard();
+      return;
     default:
       console.error(`token-tracker: unknown command "${sub}"`);
   }
