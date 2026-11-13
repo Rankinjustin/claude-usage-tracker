@@ -1,14 +1,13 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { appendFileSync } from 'node:fs';
+import { ensureDataHome, stateFile } from './core/paths';
 
-// Stub: Task 2 replaces the data-home logic with a proper module.
+// Stub: later tasks replace this with the real subcommands.
 const sub = process.argv[2] ?? '';
 console.log(sub);
 try {
-  const home = process.env.TOKEN_TRACKER_HOME || join(homedir(), '.claude', 'token-tracker');
-  mkdirSync(home, { recursive: true });
-  appendFileSync(join(home, 'debug.log'), `${new Date().toISOString()} ${sub}\n`);
+  ensureDataHome();
+  appendFileSync(stateFile('debug.log'), `${new Date().toISOString()} ${sub}
+`);
 } catch {
   // Never fail the session.
 }
