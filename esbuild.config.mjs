@@ -32,7 +32,7 @@ const lazySqlite = {
   },
 };
 
-const common ={ bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'info',
+const common = { bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'info',
   plugins: [rawText] };
 
 await build({ ...common, entryPoints: ['src/cli.ts'], outfile: 'dist/cli.mjs',

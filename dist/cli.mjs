@@ -624,7 +624,7 @@ __export(indexer_exports, {
   indexAll: () => indexAll,
   indexFile: () => indexFile
 });
-import { closeSync as closeSync3, existsSync as existsSync3, openSync as openSync3, readFileSync as readFileSync2, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync3, openSync as openSync3, readFileSync as readFileSync2, readSync, readdirSync, statSync as statSync2 } from "node:fs";
 import { basename, dirname, join as join3, resolve, sep } from "node:path";
 function add(into, r) {
   into.files += r.files;
@@ -678,7 +678,7 @@ function indexFile(db, path, opts = {}) {
   const prev = db.getFileState(p);
   let st;
   try {
-    st = statSync(p);
+    st = statSync2(p);
   } catch {
     if (prev) db.markFileMissing(p);
     return empty();
@@ -905,7 +905,7 @@ import { fileURLToPath } from "node:url";
 
 // src/ingest/lock.ts
 init_paths();
-import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join as join2 } from "node:path";
 var STALE_MS = 10 * 60 * 1e3;
 var sleep = (ms) => {
@@ -920,13 +920,35 @@ function pidAlive(pid) {
     return e.code === "EPERM";
   }
 }
-function isStale(path) {
+var CORRUPT_GRACE_MS = 3e4;
+function staleContent(path) {
+  let text;
   try {
-    const { pid, ts } = JSON.parse(readFileSync(path, "utf8"));
-    return !pidAlive(pid) || !(Date.now() - ts < STALE_MS);
+    text = readFileSync(path, "utf8");
   } catch {
-    return false;
+    return null;
   }
+  try {
+    const { pid, ts } = JSON.parse(text);
+    if (typeof pid !== "number") return text;
+    return !pidAlive(pid) || typeof ts !== "number" || !(Date.now() - ts < STALE_MS) ? text : null;
+  } catch {
+    try {
+      return Date.now() - statSync(path).mtimeMs > CORRUPT_GRACE_MS ? text : null;
+    } catch {
+      return null;
+    }
+  }
+}
+function takeOver(path) {
+  const seen = staleContent(path);
+  if (seen === null) return false;
+  try {
+    if (readFileSync(path, "utf8") !== seen) return false;
+    unlinkSync(path);
+  } catch {
+  }
+  return true;
 }
 function tryAcquire(path) {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -940,11 +962,7 @@ function tryAcquire(path) {
       return true;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      if (!isStale(path)) return false;
-      try {
-        unlinkSync(path);
-      } catch {
-      }
+      if (!takeOver(path)) return false;
     }
   }
   return false;
@@ -1014,17 +1032,40 @@ function readStdin() {
     process.stdin.on("error", finish);
   });
 }
-function hookStart() {
-  ensureDataHome();
-  const marker = stateFile("installed.json");
-  if (existsSync4(marker)) return;
-  writeFileSync(marker, JSON.stringify({ installedAt: (/* @__PURE__ */ new Date()).toISOString() }), { mode: 384 });
+function spawnBackfill() {
   if (process.env.TOKEN_TRACKER_NO_SPAWN) {
     log("hook-start: backfill spawn skipped (TOKEN_TRACKER_NO_SPAWN)");
     return;
   }
   const cli = fileURLToPath(import.meta.url);
   spawn(process.execPath, [cli, "backfill"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+}
+var BACKFILL_STALE_MS = 15 * 60 * 1e3;
+async function backfillAbandoned() {
+  const { openDb: openDb2 } = await Promise.resolve().then(() => (init_db(), db_exports));
+  const r = withWriteLock(() => {
+    const db = openDb2(dbPath());
+    try {
+      const raw = db.meta.get("backfill_progress");
+      if (!raw) return true;
+      const p = JSON.parse(raw);
+      if (p.finishedAt) return false;
+      return !(Date.now() - Date.parse(p.startedAt ?? "") < BACKFILL_STALE_MS);
+    } finally {
+      db.close();
+    }
+  });
+  return r === true;
+}
+async function hookStart() {
+  ensureDataHome();
+  const marker = stateFile("installed.json");
+  if (existsSync4(marker)) {
+    if (await backfillAbandoned()) spawnBackfill();
+    return;
+  }
+  writeFileSync(marker, JSON.stringify({ installedAt: (/* @__PURE__ */ new Date()).toISOString() }), { mode: 384 });
+  spawnBackfill();
 }
 async function pokeServer() {
   try {
@@ -1061,7 +1102,7 @@ async function run(sub) {
   switch (sub) {
     case "hook-start":
       await readStdin();
-      hookStart();
+      await hookStart();
       return;
     case "hook-end": {
       await readStdin();

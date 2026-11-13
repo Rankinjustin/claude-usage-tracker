@@ -52,11 +52,7 @@ function readStdin(): Promise<Record<string, unknown>> {
   });
 }
 
-function hookStart(): void {
-  ensureDataHome();
-  const marker = stateFile('installed.json');
-  if (existsSync(marker)) return;
-  writeFileSync(marker, JSON.stringify({ installedAt: new Date().toISOString() }), { mode: 0o600 });
+function spawnBackfill(): void {
   // Tests set this so they never start a real backfill against the user's transcripts.
   if (process.env.TOKEN_TRACKER_NO_SPAWN) {
     log('hook-start: backfill spawn skipped (TOKEN_TRACKER_NO_SPAWN)');
@@ -64,6 +60,35 @@ function hookStart(): void {
   }
   const cli = fileURLToPath(import.meta.url);
   spawn(process.execPath, [cli, 'backfill'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+}
+
+const BACKFILL_STALE_MS = 15 * 60 * 1000;
+
+/** True when an earlier backfill never finished (died) and nobody is writing right now. */
+async function backfillAbandoned(): Promise<boolean> {
+  const { openDb } = await import('./store/db');
+  const r = withWriteLock(() => {
+    const db = openDb(dbPath());
+    try {
+      const raw = db.meta.get('backfill_progress');
+      if (!raw) return true;
+      const p = JSON.parse(raw) as { startedAt?: string; finishedAt?: string };
+      if (p.finishedAt) return false;
+      return !(Date.now() - Date.parse(p.startedAt ?? '') < BACKFILL_STALE_MS);
+    } finally { db.close(); }
+  });
+  return r === true;
+}
+
+async function hookStart(): Promise<void> {
+  ensureDataHome();
+  const marker = stateFile('installed.json');
+  if (existsSync(marker)) {
+    if (await backfillAbandoned()) spawnBackfill();
+    return;
+  }
+  writeFileSync(marker, JSON.stringify({ installedAt: new Date().toISOString() }), { mode: 0o600 });
+  spawnBackfill();
 }
 
 /** Asks a live server to index; true only when it answered OK. */
@@ -109,7 +134,7 @@ async function run(sub: string): Promise<void> {
   switch (sub) {
     case 'hook-start':
       await readStdin();
-      hookStart();
+      await hookStart();
       return;
     case 'hook-end': {
       await readStdin();

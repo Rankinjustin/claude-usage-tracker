@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test } from 'vitest';
@@ -36,4 +36,22 @@ test('lock older than ten minutes is taken over even if pid is alive', () => {
 test('lock is released when fn throws', () => {
   expect(() => withWriteLock(() => { throw new Error('boom'); })).toThrow('boom');
   expect(existsSync(join(home, 'write.lock'))).toBe(false);
+});
+
+test('empty lock file older than 30s is taken over', () => {
+  const p = join(home, 'write.lock');
+  writeFileSync(p, '');
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(p, old, old);
+  expect(withWriteLock(() => 'ok')).toBe('ok');
+});
+
+test('fresh empty lock file counts as held', () => {
+  writeFileSync(join(home, 'write.lock'), '');
+  expect(withWriteLock(() => 'ok')).toBe('busy');
+});
+
+test('lock without a numeric pid is taken over', () => {
+  writeFileSync(join(home, 'write.lock'), '{"ts":1}');
+  expect(withWriteLock(() => 'ok')).toBe('ok');
 });

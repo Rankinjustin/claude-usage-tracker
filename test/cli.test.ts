@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
@@ -59,4 +59,38 @@ test('old node version prints message and exits 0', () => {
   expect(r.stdout).toBe('');
   expect(r.stderr.trim()).toBe('Token Tracker needs Node 22.13 or newer (found 20.11.1).');
   expect(existsSync(join(home, 'installed.json'))).toBe(false);
+});
+
+const spawns = (home: string): number =>
+  (readFileSync(join(home, 'debug.log'), 'utf8').match(/spawn skipped/g) ?? []).length;
+
+test('hook-start retries a backfill that never finished', () => {
+  const first = runCli('hook-start');
+  expect(spawns(first.home)).toBe(1);
+  // No backfill_progress yet: the earlier backfill died, so the next session retries it.
+  const second = runCli('hook-start', { home: first.home });
+  expect(second.r.status).toBe(0);
+  expect(spawns(first.home)).toBe(2);
+  // A finished backfill is not rerun.
+  expect(runCli('backfill', { home: first.home }).r.status).toBe(0);
+  runCli('hook-start', { home: first.home });
+  expect(spawns(first.home)).toBe(2);
+});
+
+test('hook-end with a dead server pid indexes under the lock', () => {
+  const home = mkdtempSync(join(tmpdir(), 'tt-cli-'));
+  writeFileSync(join(home, 'server.json'), JSON.stringify({ pid: 2 ** 22 + 12345, port: 9, key: 'k' }));
+  const { r } = runCli('hook-end', { home });
+  expect(r.status).toBe(0);
+  expect(existsSync(join(home, 'tracker.db'))).toBe(true);
+  expect(existsSync(join(home, 'write.lock'))).toBe(false);
+});
+
+test('hook-end skips and exits 0 when another indexer holds the lock', () => {
+  const home = mkdtempSync(join(tmpdir(), 'tt-cli-'));
+  writeFileSync(join(home, 'write.lock'), JSON.stringify({ pid: process.pid, ts: Date.now() }));
+  const { r } = runCli('hook-end', { home });
+  expect(r.status).toBe(0);
+  expect(readFileSync(join(home, 'debug.log'), 'utf8')).toContain('skipped');
+  expect(existsSync(join(home, 'write.lock'))).toBe(true);
 });

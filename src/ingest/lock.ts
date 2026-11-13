@@ -1,4 +1,4 @@
-import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataHome, ensureDataHome } from '../core/paths';
 
@@ -19,14 +19,32 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-function isStale(path: string): boolean {
+/** Lock files with no readable owner are given this long to finish being written. */
+const CORRUPT_GRACE_MS = 30_000;
+
+/** Returns the lock's raw content when it is stale (null when held, or gone). */
+function staleContent(path: string): string | null {
+  let text: string;
+  try { text = readFileSync(path, 'utf8'); } catch { return null; }
   try {
-    const { pid, ts } = JSON.parse(readFileSync(path, 'utf8')) as { pid: number; ts: number };
-    return !pidAlive(pid) || !(Date.now() - ts < STALE_MS);
+    const { pid, ts } = JSON.parse(text) as { pid?: unknown; ts?: unknown };
+    if (typeof pid !== 'number') return text;
+    return !pidAlive(pid) || typeof ts !== 'number' || !(Date.now() - ts < STALE_MS) ? text : null;
   } catch {
-    // Unreadable or half-written: the creator may be mid-write, so treat it as held.
-    return false;
+    // Empty or non-JSON: the creator may be mid-write, so only stale once the file is old.
+    try { return Date.now() - statSync(path).mtimeMs > CORRUPT_GRACE_MS ? text : null; } catch { return null; }
   }
+}
+
+/** Removes the lock only if it still holds the stale content we saw. */
+function takeOver(path: string): boolean {
+  const seen = staleContent(path);
+  if (seen === null) return false;
+  try {
+    if (readFileSync(path, 'utf8') !== seen) return false;
+    unlinkSync(path);
+  } catch { /* another process took it over first */ }
+  return true;
 }
 
 function tryAcquire(path: string): boolean {
@@ -41,8 +59,7 @@ function tryAcquire(path: string): boolean {
       return true;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      if (!isStale(path)) return false;
-      try { unlinkSync(path); } catch { /* another process took it over first */ }
+      if (!takeOver(path)) return false;
     }
   }
   return false;
