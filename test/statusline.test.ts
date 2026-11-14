@@ -143,3 +143,46 @@ test('browser url guard', () => {
   expect(isSafeDashboardUrl('http://evil.com/?key=ab')).toBe(false);
   expect(isSafeDashboardUrl('http://127.0.0.1:1/?key=ab" & calc')).toBe(false);
 });
+
+test('hook-start repairs a stale Token Tracker status line path', () => {
+  const claude = mkdtempSync(join(tmpdir(), 'tt-slc-'));
+  writeFileSync(settingsOf(claude), JSON.stringify({
+    theme: 'dark',
+    statusLine: { type: 'command', command: 'node "C:/old/token-tracker/0.0.1/dist/cli.mjs" statusline' },
+  }));
+  expect(runCli(['hook-start'], { claude }).r.status).toBe(0);
+  const s = JSON.parse(readFileSync(settingsOf(claude), 'utf8'));
+  expect(s.theme).toBe('dark');
+  expect(s.statusLine.command).toMatch(/^node ".*token-tracker.*dist.cli\.mjs" statusline$/);
+  expect(s.statusLine.command).not.toContain('0.0.1');
+});
+
+test('hook-start leaves a foreign status line alone', () => {
+  const claude = mkdtempSync(join(tmpdir(), 'tt-slc-'));
+  const foreign = JSON.stringify({ statusLine: { type: 'command', command: 'node "/x/other/cli.mjs" statusline' } });
+  writeFileSync(settingsOf(claude), foreign);
+  runCli(['hook-start'], { claude });
+  expect(readFileSync(settingsOf(claude), 'utf8')).toBe(foreign);
+  const none = mkdtempSync(join(tmpdir(), 'tt-slc-'));
+  runCli(['hook-start'], { claude: none });
+  expect(existsSync(settingsOf(none))).toBe(false);
+});
+
+test('setup keeps the first backup and leaves invalid JSON byte-identical', () => {
+  const claude = mkdtempSync(join(tmpdir(), 'tt-slc-'));
+  writeFileSync(settingsOf(claude), JSON.stringify({ a: 1, statusLine: { type: 'command', command: 'one' } }));
+  runCli(['setup', '--apply', '--replace'], { claude });
+  const bak = join(claude, 'settings.json.bak-token-tracker');
+  const first = readFileSync(bak, 'utf8');
+  writeFileSync(settingsOf(claude), JSON.stringify({ a: 1, statusLine: { type: 'command', command: 'two' } }));
+  runCli(['setup', '--apply', '--replace'], { claude });
+  expect(readFileSync(bak, 'utf8')).toBe(first);
+
+  const bad = mkdtempSync(join(tmpdir(), 'tt-slc-'));
+  const text = '{\n  // comment\n  "a": 1,\n}\n';
+  writeFileSync(settingsOf(bad), text);
+  const r = runCli(['setup', '--apply', '--replace'], { claude: bad }).r;
+  expect(r.status).toBe(0);
+  expect(readFileSync(settingsOf(bad), 'utf8')).toBe(text);
+  expect(existsSync(join(bad, 'settings.json.bak-token-tracker'))).toBe(false);
+});

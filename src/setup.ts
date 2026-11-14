@@ -16,7 +16,10 @@ function readSettings(file: string): Settings {
 }
 
 /** Ours when the command runs this plugin's `statusline` subcommand. */
-const isOurs = (s: Settings): boolean => /cli\.mjs"? statusline$/.test(s.statusLine?.command ?? '');
+const isOurs = (s: Settings): boolean => {
+  const c = s.statusLine?.command ?? '';
+  return c.endsWith('cli.mjs" statusline') && /token-tracker/i.test(c);
+};
 
 export function setupCheck(): string {
   const file = settingsPath();
@@ -24,6 +27,27 @@ export function setupCheck(): string {
   try { s = readSettings(file); } catch (e) { return `Status line: unknown (${(e as Error).message})`; }
   if (!s.statusLine) return 'Status line: not set';
   return isOurs(s) ? 'Status line: Token Tracker' : `Status line: other (${s.statusLine.command ?? '?'})`;
+}
+
+function writeAtomic(file: string, s: Settings): void {
+  const tmp = `${file}.tt-${process.pid}-${Math.random().toString(36).slice(2)}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`);
+  renameSync(tmp, file);
+}
+
+/**
+ * Called on session start: if our status line points at a different cli.mjs (plugin updated), rewrite just
+ * that command. Never creates or touches a statusLine that is not ours. Returns true when it rewrote.
+ */
+export function repairStatusLine(cliPath: string): boolean {
+  const file = settingsPath();
+  if (!existsSync(file)) return false;
+  const s = readSettings(file);
+  const command = `node "${cliPath}" statusline`;
+  if (!s.statusLine || !isOurs(s) || s.statusLine.command === command) return false;
+  s.statusLine = { ...s.statusLine, command };
+  writeAtomic(file, s);
+  return true;
 }
 
 /** Installs the status line; `cliPath` is the absolute path of the running dist/cli.mjs. */
@@ -40,10 +64,9 @@ export function setupApply(cliPath: string, replace: boolean): string {
       'Run setup --apply --replace to replace it (a backup is kept).';
   }
   mkdirSync(dirname(file), { recursive: true });
-  if (existsSync(file)) copyFileSync(file, `${file}.bak-token-tracker`);
+  const bak = `${file}.bak-token-tracker`;
+  if (existsSync(file) && !existsSync(bak)) copyFileSync(file, bak);
   s.statusLine = { type: 'command', command };
-  const tmp = `${file}.tt-tmp`;
-  writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`);
-  renameSync(tmp, file);
+  writeAtomic(file, s);
   return `Status line installed in ${file}.`;
 }

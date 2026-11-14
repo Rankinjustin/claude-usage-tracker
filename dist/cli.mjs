@@ -482,6 +482,84 @@ var init_db = __esm({
   }
 });
 
+// src/setup.ts
+var setup_exports = {};
+__export(setup_exports, {
+  repairStatusLine: () => repairStatusLine,
+  settingsPath: () => settingsPath,
+  setupApply: () => setupApply,
+  setupCheck: () => setupCheck
+});
+import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname, join as join3 } from "node:path";
+function settingsPath() {
+  return join3(process.env.CLAUDE_CONFIG_DIR || join3(homedir2(), ".claude"), "settings.json");
+}
+function readSettings(file) {
+  if (!existsSync3(file)) return {};
+  const parsed = JSON.parse(readFileSync2(file, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("settings.json is not a JSON object");
+  return parsed;
+}
+function setupCheck() {
+  const file = settingsPath();
+  let s;
+  try {
+    s = readSettings(file);
+  } catch (e) {
+    return `Status line: unknown (${e.message})`;
+  }
+  if (!s.statusLine) return "Status line: not set";
+  return isOurs(s) ? "Status line: Token Tracker" : `Status line: other (${s.statusLine.command ?? "?"})`;
+}
+function writeAtomic(file, s) {
+  const tmp = `${file}.tt-${process.pid}-${Math.random().toString(36).slice(2)}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(s, null, 2)}
+`);
+  renameSync(tmp, file);
+}
+function repairStatusLine(cliPath) {
+  const file = settingsPath();
+  if (!existsSync3(file)) return false;
+  const s = readSettings(file);
+  const command = `node "${cliPath}" statusline`;
+  if (!s.statusLine || !isOurs(s) || s.statusLine.command === command) return false;
+  s.statusLine = { ...s.statusLine, command };
+  writeAtomic(file, s);
+  return true;
+}
+function setupApply(cliPath, replace) {
+  const file = settingsPath();
+  let s;
+  try {
+    s = readSettings(file);
+  } catch (e) {
+    return `Not changed: ${file} could not be read as JSON (${e.message}). Fix or remove it and retry.`;
+  }
+  const command = `node "${cliPath}" statusline`;
+  if (s.statusLine && s.statusLine.command === command) return "Status line already installed; nothing changed.";
+  if (s.statusLine && !isOurs(s) && !replace) {
+    return `Not changed: a different status line is already set (${s.statusLine.command ?? "?"}). Run setup --apply --replace to replace it (a backup is kept).`;
+  }
+  mkdirSync2(dirname(file), { recursive: true });
+  const bak = `${file}.bak-token-tracker`;
+  if (existsSync3(file) && !existsSync3(bak)) copyFileSync(file, bak);
+  s.statusLine = { type: "command", command };
+  writeAtomic(file, s);
+  return `Status line installed in ${file}.`;
+}
+var isOurs;
+var init_setup = __esm({
+  "src/setup.ts"() {
+    "use strict";
+    isOurs = (s) => {
+      const c = s.statusLine?.command ?? "";
+      return c.endsWith('cli.mjs" statusline') && /token-tracker/i.test(c);
+    };
+  }
+});
+
 // src/core/prices.ts
 function priceCall(model, tokens, at, speed = "standard") {
   const atMs = Date.parse(at);
@@ -743,8 +821,8 @@ __export(indexer_exports, {
   indexAllAsync: () => indexAllAsync,
   indexFile: () => indexFile
 });
-import { closeSync as closeSync3, existsSync as existsSync3, openSync as openSync3, readFileSync as readFileSync2, readSync, readdirSync, statSync as statSync2 } from "node:fs";
-import { basename, dirname, join as join3, resolve, sep } from "node:path";
+import { closeSync as closeSync3, existsSync as existsSync4, openSync as openSync3, readFileSync as readFileSync3, readSync, readdirSync, statSync as statSync2 } from "node:fs";
+import { basename, dirname as dirname2, join as join4, resolve, sep } from "node:path";
 function add(into, r) {
   into.files += r.files;
   into.newCalls += r.newCalls;
@@ -759,13 +837,13 @@ function listTranscripts(root) {
   const subs = [];
   for (const p of dirEntries(root)) {
     if (!p.isDirectory()) continue;
-    const proj = join3(root, p.name);
+    const proj = join4(root, p.name);
     for (const e of dirEntries(proj)) {
-      if (e.isFile() && e.name.endsWith(".jsonl")) mains.push(join3(proj, e.name));
+      if (e.isFile() && e.name.endsWith(".jsonl")) mains.push(join4(proj, e.name));
       else if (e.isDirectory()) {
-        const sub = join3(proj, e.name, "subagents");
+        const sub = join4(proj, e.name, "subagents");
         for (const s of dirEntries(sub)) {
-          if (s.isFile() && s.name.startsWith("agent-") && s.name.endsWith(".jsonl")) subs.push(join3(sub, s.name));
+          if (s.isFile() && s.name.startsWith("agent-") && s.name.endsWith(".jsonl")) subs.push(join4(sub, s.name));
         }
       }
     }
@@ -823,7 +901,7 @@ function indexFile(db, path, opts = {}) {
   const out = empty();
   out.files = 1;
   if (prev && !prev.missing && st.size === prev.size && st.mtimeMs === prev.mtimeMs) return out;
-  const isSub = basename(dirname(p)) === "subagents";
+  const isSub = basename(dirname2(p)) === "subagents";
   let offset = prev?.offset ?? 0;
   const rescan = st.size < offset;
   if (rescan) offset = 0;
@@ -947,7 +1025,7 @@ function indexFile(db, path, opts = {}) {
         }
         if (sid === null) {
           const m2 = SESSION_RE.exec(data.toString("utf8", 0, last));
-          sid = m2 ? m2[1] : isSub ? basename(dirname(dirname(p))) : basename(p, ".jsonl");
+          sid = m2 ? m2[1] : isSub ? basename(dirname2(dirname2(p))) : basename(p, ".jsonl");
         }
         runId = isSub ? basename(p, ".jsonl") : `main:${sid}`;
         let start = 0;
@@ -961,10 +1039,10 @@ function indexFile(db, path, opts = {}) {
         consumed += last + 1;
         carry = Buffer.from(data.subarray(last + 1));
       }
-      if (sid === null) sid = isSub ? basename(dirname(dirname(p))) : basename(p, ".jsonl");
+      if (sid === null) sid = isSub ? basename(dirname2(dirname2(p))) : basename(p, ".jsonl");
       runId = isSub ? basename(p, ".jsonl") : `main:${sid}`;
       if (touched) {
-        const project = basename(isSub ? dirname(dirname(dirname(p))) : dirname(p));
+        const project = basename(isSub ? dirname2(dirname2(dirname2(p))) : dirname2(p));
         db.upsertSession({ id: sid, title, project, cwd, firstTs, lastTs, ccVersion });
         upsertRunFor(db, p, isSub, sid, runId);
         out.changedSessions.push(sid);
@@ -991,7 +1069,7 @@ function upsertRunFor(db, p, isSub, sid, runId) {
     return;
   }
   const metaPath = p.replace(/\.jsonl$/, ".meta.json");
-  const meta = parseSubagentMeta(existsSync3(metaPath) ? readFileSync2(metaPath, "utf8") : "");
+  const meta = parseSubagentMeta(existsSync4(metaPath) ? readFileSync3(metaPath, "utf8") : "");
   const launcher = meta.toolUseId ? db.raw.prepare("SELECT run_id FROM tool_calls WHERE tool_use_id = ?").get(meta.toolUseId) : void 0;
   const parent = launcher?.run_id ?? (meta.spawnDepth <= 1 ? `main:${sid}` : null);
   db.upsertRun({
@@ -1078,7 +1156,7 @@ __export(views_exports, {
   sessions: () => sessions,
   statusLine: () => statusLine
 });
-import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync4 } from "node:fs";
 function all(db, sql, ...p) {
   return db.raw.prepare(sql).all(...p);
 }
@@ -1465,8 +1543,8 @@ function agentDetail(db, type, r, now) {
 function installedAt() {
   try {
     const f = stateFile("installed.json");
-    if (!existsSync4(f)) return null;
-    const v = JSON.parse(readFileSync3(f, "utf8")).installedAt;
+    if (!existsSync5(f)) return null;
+    const v = JSON.parse(readFileSync4(f, "utf8")).installedAt;
     return typeof v === "string" ? v : null;
   } catch {
     return null;
@@ -1555,7 +1633,7 @@ __export(server_exports, {
   startServer: () => startServer
 });
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync5, readFileSync as readFileSync4, realpathSync, renameSync, rmSync, statSync as statSync3, watch, writeFileSync } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync5, realpathSync, renameSync as renameSync2, rmSync, statSync as statSync3, watch, writeFileSync as writeFileSync2 } from "node:fs";
 import { createServer } from "node:http";
 import { extname, resolve as resolve2, sep as sep2 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1698,9 +1776,9 @@ async function startServer(opts = {}) {
     if (rel.includes("\0")) throw new HttpError(400, "bad path");
     let file = resolve2(uiDir, "." + (rel.startsWith("/") ? rel : "/" + rel));
     if (file !== uiDir && !file.startsWith(uiDir + sep2)) throw new HttpError(403, "forbidden");
-    if (!existsSync5(file) || !statSync3(file).isFile()) file = resolve2(uiDir, "index.html");
-    if (!existsSync5(file)) throw new HttpError(404, "ui not built");
-    send(res, 200, readFileSync4(file), MIME[extname(file).toLowerCase()] ?? "application/octet-stream", extra);
+    if (!existsSync6(file) || !statSync3(file).isFile()) file = resolve2(uiDir, "index.html");
+    if (!existsSync6(file)) throw new HttpError(404, "ui not built");
+    send(res, 200, readFileSync5(file), MIME[extname(file).toLowerCase()] ?? "application/octet-stream", extra);
   }
   function handle(req, res) {
     lastActivity = Date.now();
@@ -1769,7 +1847,7 @@ async function startServer(opts = {}) {
   const serverFile = stateFile("server.json");
   const removeServerFile = () => {
     try {
-      const cur = JSON.parse(readFileSync4(serverFile, "utf8"));
+      const cur = JSON.parse(readFileSync5(serverFile, "utf8"));
       if (cur.pid === process.pid && cur.key === key) rmSync(serverFile, { force: true });
     } catch {
     }
@@ -1816,12 +1894,12 @@ async function startServer(opts = {}) {
   });
   port = server.address().port;
   const tmpFile = `${serverFile}.tmp`;
-  writeFileSync(
+  writeFileSync2(
     tmpFile,
     JSON.stringify({ pid: process.pid, port, key, startedAt: (/* @__PURE__ */ new Date()).toISOString() }),
     { mode: 384 }
   );
-  renameSync(tmpFile, serverFile);
+  renameSync2(tmpFile, serverFile);
   server.on("error", (e) => log(`server error: ${e instanceof Error ? e.message : String(e)}`));
   process.on("exit", onExit);
   process.on("SIGINT", onSignal);
@@ -1878,7 +1956,7 @@ __export(statusline_exports, {
   formatStatusLine: () => formatStatusLine,
   statusLineText: () => statusLineText
 });
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync7 } from "node:fs";
 function formatStatusLine(p) {
   if (p.today === null && p.session === null && p.contextTokens === null) return "\u25AE\u25AE\u25AE Token Tracker";
   const out = [`\u25AE\u25AE\u25AE ${p.today === null ? "today \u2014" : `${money(p.today)} today`}`];
@@ -1896,7 +1974,7 @@ async function statusLineText(stdin) {
   const contextTokens = pct2 !== null && size !== null ? pct2 * size / 100 : null;
   try {
     const path = dbPath();
-    if (existsSync6(path)) {
+    if (existsSync7(path)) {
       const raw = new DatabaseSync(path, { readOnly: true });
       try {
         raw.exec("PRAGMA busy_timeout = 200");
@@ -1925,66 +2003,6 @@ var init_statusline = __esm({
     money = (n) => `$${n.toFixed(2)}`;
     num2 = (v) => typeof v === "number" && Number.isFinite(v) ? v : null;
     obj = (v) => v && typeof v === "object" ? v : {};
-  }
-});
-
-// src/setup.ts
-var setup_exports = {};
-__export(setup_exports, {
-  settingsPath: () => settingsPath,
-  setupApply: () => setupApply,
-  setupCheck: () => setupCheck
-});
-import { copyFileSync, existsSync as existsSync7, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join4 } from "node:path";
-function settingsPath() {
-  return join4(process.env.CLAUDE_CONFIG_DIR || join4(homedir2(), ".claude"), "settings.json");
-}
-function readSettings(file) {
-  if (!existsSync7(file)) return {};
-  const parsed = JSON.parse(readFileSync5(file, "utf8"));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("settings.json is not a JSON object");
-  return parsed;
-}
-function setupCheck() {
-  const file = settingsPath();
-  let s;
-  try {
-    s = readSettings(file);
-  } catch (e) {
-    return `Status line: unknown (${e.message})`;
-  }
-  if (!s.statusLine) return "Status line: not set";
-  return isOurs(s) ? "Status line: Token Tracker" : `Status line: other (${s.statusLine.command ?? "?"})`;
-}
-function setupApply(cliPath, replace) {
-  const file = settingsPath();
-  let s;
-  try {
-    s = readSettings(file);
-  } catch (e) {
-    return `Not changed: ${file} could not be read as JSON (${e.message}). Fix or remove it and retry.`;
-  }
-  const command = `node "${cliPath}" statusline`;
-  if (s.statusLine && s.statusLine.command === command) return "Status line already installed; nothing changed.";
-  if (s.statusLine && !isOurs(s) && !replace) {
-    return `Not changed: a different status line is already set (${s.statusLine.command ?? "?"}). Run setup --apply --replace to replace it (a backup is kept).`;
-  }
-  mkdirSync2(dirname2(file), { recursive: true });
-  if (existsSync7(file)) copyFileSync(file, `${file}.bak-token-tracker`);
-  s.statusLine = { type: "command", command };
-  const tmp = `${file}.tt-tmp`;
-  writeFileSync2(tmp, `${JSON.stringify(s, null, 2)}
-`);
-  renameSync2(tmp, file);
-  return `Status line installed in ${file}.`;
-}
-var isOurs;
-var init_setup = __esm({
-  "src/setup.ts"() {
-    "use strict";
-    isOurs = (s) => /cli\.mjs"? statusline$/.test(s.statusLine?.command ?? "");
   }
 });
 
@@ -2065,8 +2083,17 @@ async function backfillAbandoned() {
   });
   return r === true;
 }
+async function repairSettings() {
+  try {
+    const { repairStatusLine: repairStatusLine2 } = await Promise.resolve().then(() => (init_setup(), setup_exports));
+    if (repairStatusLine2(fileURLToPath2(import.meta.url))) log("hook-start: repaired status line path");
+  } catch (e) {
+    log(`status line repair failed: ${errText(e)}`);
+  }
+}
 async function hookStart() {
   ensureDataHome();
+  await repairSettings();
   const marker = stateFile("installed.json");
   if (existsSync8(marker)) {
     if (await backfillAbandoned()) spawnBackfill();

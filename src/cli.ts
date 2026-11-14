@@ -73,8 +73,19 @@ async function backfillAbandoned(): Promise<boolean> {
   return r === true;
 }
 
+/** Keeps our status line pointing at this install after a plugin update; silent, never throws. */
+async function repairSettings(): Promise<void> {
+  try {
+    const { repairStatusLine } = await import('./setup');
+    if (repairStatusLine(fileURLToPath(import.meta.url))) log('hook-start: repaired status line path');
+  } catch (e) {
+    log(`status line repair failed: ${errText(e)}`);
+  }
+}
+
 async function hookStart(): Promise<void> {
   ensureDataHome();
+  await repairSettings();
   const marker = stateFile('installed.json');
   if (existsSync(marker)) {
     if (await backfillAbandoned()) spawnBackfill();
