@@ -42,9 +42,15 @@ export async function statusLineText(stdin: Record<string, unknown>): Promise<st
         raw.exec('PRAGMA busy_timeout = 200');
         const { statusLine } = await import('./query/views');
         const s = statusLine({ raw } as Db, sessionId ?? '');
-        return formatStatusLine({
-          today: s.today, session: sessionId === null ? null : s.session, alerts: s.alerts, contextTokens,
-        });
+        let { today, session } = s;
+        // The db learns the current session only at SessionEnd or while the server runs, so the in-flight part
+        // comes from Claude Code's own cost estimate on stdin. If the session began before midnight, today
+        // includes its pre-midnight share of that part.
+        if (sessionId !== null && stdinCost !== null && stdinCost > s.session) {
+          today += stdinCost - s.session;
+          session = stdinCost;
+        }
+        return formatStatusLine({ today, session: sessionId === null ? null : session, alerts: s.alerts, contextTokens });
       } finally { raw.close(); }
     }
   } catch {

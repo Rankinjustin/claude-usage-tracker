@@ -36,8 +36,10 @@ function writeAtomic(file: string, s: Settings): void {
 }
 
 /**
- * Called on session start: if our status line points at a different cli.mjs (plugin updated), rewrite just
- * that command. Never creates or touches a statusLine that is not ours. Returns true when it rewrote.
+ * Called on session start: if our status line points at a cli.mjs that no longer exists (plugin updated and
+ * the old version removed), rewrite just that command. A referenced cli.mjs that still exists is left alone, so
+ * the installed plugin and a dev `--plugin-dir` run don't keep rewriting it to each other. Never creates or
+ * touches a statusLine that is not ours. Returns true when it rewrote.
  */
 export function repairStatusLine(cliPath: string): boolean {
   const file = settingsPath();
@@ -45,6 +47,8 @@ export function repairStatusLine(cliPath: string): boolean {
   const s = readSettings(file);
   const command = `node "${cliPath}" statusline`;
   if (!s.statusLine || !isOurs(s) || s.statusLine.command === command) return false;
+  const referenced = /^node "(.+)" statusline$/.exec(s.statusLine.command ?? '')?.[1];
+  if (!referenced || existsSync(referenced)) return false;
   s.statusLine = { ...s.statusLine, command };
   writeAtomic(file, s);
   return true;

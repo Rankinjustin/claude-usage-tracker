@@ -1,17 +1,22 @@
 import { chmodSync, closeSync, existsSync, openSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite';
+import { priceCall } from '../core/prices';
 import type { TokenParts, ToolUse } from '../core/types';
 import { dbPath, ensureDataHome } from '../core/paths';
 import schema from './schema.sql?raw';
 
 /** Ordered migrations; `PRAGMA user_version` is the number applied. Append only. */
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   schema,
   // v2: compactions and hook runs are keyed so a rescan from offset 0 cannot duplicate them.
   `DELETE FROM compactions WHERE rowid NOT IN (SELECT MIN(rowid) FROM compactions GROUP BY session_id, ts);
    CREATE UNIQUE INDEX compactions_key ON compactions(session_id, ts);
    DELETE FROM hook_runs WHERE rowid NOT IN (SELECT MIN(rowid) FROM hook_runs GROUP BY session_id, ts, command);
    CREATE UNIQUE INDEX hook_runs_key ON hook_runs(session_id, ts, command);`,
+  // v3: split responses now keep their largest output/thinking. Re-read every transcript still on disk so rows
+  // stored first-part-wins are corrected (all inserts are idempotent). Missing files cannot be re-read; their
+  // offset/size stay as they were because coverage() reads them.
+  `UPDATE files SET "offset" = 0, size = 0, mtime_ms = 0 WHERE missing = 0;`,
 ];
 
 export interface SessionRow {
@@ -51,7 +56,10 @@ export interface Db {
   /** Returns true when the prompt is new. */
   insertPrompt(p: PromptRow): boolean;
   setPromptDuration(uuid: string, durationMs: number): void;
-  /** Returns true when this message id was not stored before. */
+  /**
+   * Returns true when this message id was not stored before. A later part of a split response with a larger
+   * output or thinking count raises the stored row to the maximum and reprices it.
+   */
   upsertApiCall(c: ApiCallRow & { toolUses: ToolUse[]; advisor: AdvisorRow[] }): boolean;
   insertToolCall(t: ToolCallRow): void;
   completeToolCall(toolUseId: string, r: ToolResultRow): void;
@@ -71,11 +79,23 @@ export interface Db {
 
 const flag = (b: boolean): number => (b ? 1 : 0);
 
+const userVersion = (raw: DatabaseSync): number =>
+  (raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+
+/**
+ * Applies pending migrations one per write transaction. The version is re-read after BEGIN IMMEDIATE, so when
+ * two processes open a fresh db at once the second sees the first one's work instead of re-running it.
+ */
 function migrate(raw: DatabaseSync): void {
-  const row = raw.prepare('PRAGMA user_version').get() as { user_version: number };
-  for (let v = row.user_version; v < MIGRATIONS.length; v++) {
+  if (userVersion(raw) >= MIGRATIONS.length) return; // versions only grow, so an unlocked read can skip
+  for (;;) {
     raw.exec('BEGIN IMMEDIATE');
     try {
+      const v = userVersion(raw);
+      if (v >= MIGRATIONS.length) {
+        raw.exec('COMMIT');
+        return;
+      }
       raw.exec(MIGRATIONS[v]);
       raw.exec(`PRAGMA user_version = ${v + 1}`);
       raw.exec('COMMIT');
@@ -93,10 +113,16 @@ export function openDb(path: string): Db {
   // Pre-create at 0600 so SQLite's -wal/-shm side files inherit the mode.
   if (!existed && process.platform !== 'win32') closeSync(openSync(path, 'a', 0o600));
   const raw = new DatabaseSync(path);
-  raw.exec('PRAGMA journal_mode = WAL');
-  raw.exec('PRAGMA foreign_keys = ON');
-  raw.exec('PRAGMA busy_timeout = 5000');
-  migrate(raw);
+  try {
+    // busy_timeout first: on a fresh-db race the WAL switch is already a contended write.
+    raw.exec('PRAGMA busy_timeout = 5000');
+    raw.exec('PRAGMA journal_mode = WAL');
+    raw.exec('PRAGMA foreign_keys = ON');
+    migrate(raw);
+  } catch (e) {
+    raw.close();
+    throw e;
+  }
   if (!existed && process.platform !== 'win32') {
     try { chmodSync(path, 0o600); } catch { /* best effort */ }
   }
@@ -122,6 +148,28 @@ export function openDb(path: string): Db {
     run(`UPDATE tool_calls SET ended_ts=?, result_chars=?, is_error=?, denied=?, permission=? WHERE tool_use_id=?`,
       p.ended_ts, p.result_chars, p.is_error, p.denied, p.permission, t.toolUseId);
     run('DELETE FROM pending_results WHERE tool_use_id = ?', t.toolUseId);
+  };
+
+  /**
+   * Claude Code writes one response as several records sharing message.id; later records carry the larger
+   * output/thinking counts. Raises the stored row to the per-field maximum and reprices it. Attribution, ts,
+   * prompt/cache tokens and advisor rows stay as the first record left them.
+   */
+  const growSplitResponse = (c: ApiCallRow): void => {
+    const e = q(`SELECT model, ts, speed, input, cache_write_5m, cache_write_1h, cache_read, output, thinking
+      FROM api_calls WHERE message_id = ?`).get(c.messageId) as
+      { model: string; ts: string; speed: string; input: number; cache_write_5m: number; cache_write_1h: number;
+        cache_read: number; output: number; thinking: number } | undefined;
+    if (!e || (c.tokens.output <= e.output && c.tokens.thinking <= e.thinking)) return;
+    const tokens: TokenParts = { input: e.input, cacheWrite5m: e.cache_write_5m, cacheWrite1h: e.cache_write_1h,
+      cacheRead: e.cache_read, output: Math.max(e.output, c.tokens.output),
+      thinking: Math.max(e.thinking, c.tokens.thinking) };
+    const pr = priceCall(e.model, tokens, e.ts, e.speed === 'fast' ? 'fast' : 'standard');
+    const larger = c.tokens.output + c.tokens.thinking > e.output + e.thinking;
+    run(`UPDATE api_calls SET output=?, thinking=?, cost=?, cost_parts_json=?, price_id=?,
+        raw_json = CASE WHEN ? THEN ? ELSE raw_json END WHERE message_id=?`,
+    tokens.output, tokens.thinking, pr.cost, pr.parts ? JSON.stringify(pr.parts) : null, pr.priceId,
+    flag(larger), c.rawJson, c.messageId);
   };
 
   let depth = 0;
@@ -171,6 +219,8 @@ export function openDb(path: string): Db {
             run('INSERT INTO advisor_calls (message_id, model, tokens_json, cost) VALUES (?,?,?,?)',
               c.messageId, a.model, JSON.stringify(a.tokens), a.cost);
           }
+        } else {
+          growSplitResponse(c);
         }
         for (const u of c.toolUses) {
           insertToolCall({ toolUseId: u.id, messageId: c.messageId, runId: c.runId, promptUuid: c.promptUuid,

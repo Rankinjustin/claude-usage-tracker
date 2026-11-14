@@ -42,12 +42,30 @@ test('formats today, session, context', () => {
     { id: 'b', session: 'S1', ts: nowIso(), cost: 7.03 },
     { id: 'c', session: 'S2', ts: nowIso(), cost: 1 },
   ]);
+  // stdin's cost is below what the db already holds for the session, so the db wins.
   const { r } = runCli(['statusline'], { home, input: stdin({
-    session_id: 'S1', cost: { total_cost_usd: 99 },
+    session_id: 'S1', cost: { total_cost_usd: 5 },
     context_window: { used_percentage: 14.7, context_window_size: 1000000 },
   }) });
   expect(r.status).toBe(0);
   expect(r.stdout).toBe('▮▮▮ $12.03 today · session $11.03 · context 147K\n');
+});
+
+test('live session not yet in the db uses stdin cost for session and today', () => {
+  const home = mkdtempSync(join(tmpdir(), 'tt-sl-'));
+  seed(home, [{ id: 'c', session: 'S2', ts: nowIso(), cost: 1 }]);
+  const { r } = runCli(['statusline'], { home, input: stdin({ session_id: 'S1', cost: { total_cost_usd: 2.14 } }) });
+  expect(r.stdout).toBe('▮▮▮ $3.14 today · session $2.14\n');
+});
+
+test('live session partly in the db adds only the unrecorded part to today', () => {
+  const home = mkdtempSync(join(tmpdir(), 'tt-sl-'));
+  seed(home, [
+    { id: 'a', session: 'S1', ts: nowIso(), cost: 1.5 },
+    { id: 'c', session: 'S2', ts: nowIso(), cost: 1 },
+  ]);
+  const { r } = runCli(['statusline'], { home, input: stdin({ session_id: 'S1', cost: { total_cost_usd: 2 } }) });
+  expect(r.stdout).toBe('▮▮▮ $3.00 today · session $2.00\n');
 });
 
 test('shows alert marker', () => {
@@ -155,6 +173,18 @@ test('hook-start repairs a stale Token Tracker status line path', () => {
   expect(s.theme).toBe('dark');
   expect(s.statusLine.command).toMatch(/^node ".*token-tracker.*dist.cli\.mjs" statusline$/);
   expect(s.statusLine.command).not.toContain('0.0.1');
+});
+
+test('hook-start leaves our status line alone while the cli.mjs it names still exists', () => {
+  const claude = mkdtempSync(join(tmpdir(), 'tt-slc-'));
+  // e.g. the installed plugin while a dev --plugin-dir session starts: both paths are real installs.
+  const other = join(mkdtempSync(join(tmpdir(), 'tt-dev-')), 'token-tracker', 'dist');
+  mkdirSync(other, { recursive: true });
+  writeFileSync(join(other, 'cli.mjs'), '');
+  const before = JSON.stringify({ statusLine: { type: 'command', command: `node "${join(other, 'cli.mjs')}" statusline` } });
+  writeFileSync(settingsOf(claude), before);
+  expect(runCli(['hook-start'], { claude }).r.status).toBe(0);
+  expect(readFileSync(settingsOf(claude), 'utf8')).toBe(before);
 });
 
 test('hook-start leaves a foreign status line alone', () => {

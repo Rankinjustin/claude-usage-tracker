@@ -419,14 +419,19 @@ function installedAt(): string | null {
   } catch { return null; }
 }
 
+/** A transcript that vanished while it still had bytes we never read (offset short of its last known size). */
+const LOST_FILE = `missing = 1 AND "offset" < size`;
+
 /**
- * Index coverage. `sessionsPartial` = sessions with at least one transcript file that disappeared after it was
- * indexed (their rows are kept, the history may be incomplete). `filesMissingBeforeIndexed` = transcript files that
- * disappeared after being seen; their rows are kept.
+ * Index coverage. `sessionsPartial` = sessions with at least one transcript file that disappeared with unread
+ * bytes (their rows are kept, the history may be incomplete). `filesMissingBeforeIndexed` = transcript files that
+ * disappeared before they were fully indexed. A fully indexed transcript that Claude Code cleaned up is not a gap:
+ * everything in it is recorded, so it counts in neither. Bytes written after the last pass and then deleted before
+ * the next one cannot be seen at all.
  */
 export function coverage(db: Db) {
   const n = (sql: string): number => all(db, sql)[0].n as number;
-  const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE missing = 1 AND session_id IS NOT NULL`);
+  const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE ${LOST_FILE} AND session_id IS NOT NULL`);
   let progress: unknown = null;
   try { progress = JSON.parse(db.meta.get('backfill_progress') ?? 'null'); } catch { /* unreadable: treat as none */ }
   const started = (progress as { startedAt?: string } | null)?.startedAt ?? null;
@@ -434,7 +439,7 @@ export function coverage(db: Db) {
     installedAt: installedAt() ?? started,
     sessionsComplete: n('SELECT COUNT(*) AS n FROM sessions') - sessionsPartial,
     sessionsPartial,
-    filesMissingBeforeIndexed: n('SELECT COUNT(*) AS n FROM files WHERE missing = 1'),
+    filesMissingBeforeIndexed: n(`SELECT COUNT(*) AS n FROM files WHERE ${LOST_FILE}`),
     backfillProgress: progress,
   };
 }

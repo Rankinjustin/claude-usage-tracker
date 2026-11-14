@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
-import { openDb, type ApiCallRow, type Db } from '../../src/store/db';
+import { MIGRATIONS, openDb, type ApiCallRow, type Db } from '../../src/store/db';
 import type { TokenParts, ToolUse } from '../../src/core/types';
 import schemaV1 from '../../src/store/schema.sql?raw';
 
@@ -187,8 +188,66 @@ describe('store', () => {
     db.insertCompaction({ sessionId: 's1', runId: null, ts: 't1', preTokens: 5, durationMs: 0, trigger: '' });
     db.insertHookRuns('s1', 't1', [{ command: 'c', durationMs: 3 }]);
     db.close();
-    expect(raw(path, 'PRAGMA user_version')[0].user_version).toBe(2);
+    expect(raw(path, 'PRAGMA user_version')[0].user_version).toBe(MIGRATIONS.length);
     expect(raw(path, 'select * from compactions')).toHaveLength(1);
     expect(raw(path, 'select * from hook_runs')).toHaveLength(1);
+  });
+
+  it('migration v3 resets present files for a re-read and keeps missing ones as they were', () => {
+    const { db, path } = open();
+    db.setFileState('/a.jsonl', { size: 100, mtimeMs: 5, offset: 100, sessionId: 's', runId: 'r' });
+    db.setFileState('/gone.jsonl', { size: 80, mtimeMs: 5, offset: 60, sessionId: 's', runId: 'r' });
+    db.markFileMissing('/gone.jsonl');
+    db.raw.exec('PRAGMA user_version = 2');
+    db.close();
+    const db2 = openDb(path);
+    expect(db2.getFileState('/a.jsonl')).toMatchObject({ offset: 0, size: 0, mtimeMs: 0, missing: false });
+    expect(db2.getFileState('/gone.jsonl')).toMatchObject({ offset: 60, size: 80, missing: true });
+    db2.close();
+  });
+
+  it('two openDb calls on one new path: the second is a no-op', () => {
+    const d = mkdtempSync(join(tmpdir(), 'tt db '));
+    dirs.push(d);
+    const path = join(d, 'tracker.db');
+    const a = openDb(path);
+    const b = openDb(path);
+    b.close();
+    a.close();
+    expect(raw(path, 'PRAGMA user_version')[0].user_version).toBe(MIGRATIONS.length);
+  });
+
+  it('version is re-read inside the migration transaction (another process migrated meanwhile)', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'tt db '));
+    dirs.push(d);
+    const path = join(d, 'tracker.db');
+    const sqlFile = join(d, 'migrations.json');
+    writeFileSync(sqlFile, JSON.stringify(MIGRATIONS));
+    const script = join(d, 'other.mjs');
+    // The other process applies every migration inside a write transaction it holds for 700 ms, so our
+    // unlocked version read sees 0 and only the read inside BEGIN IMMEDIATE sees its work.
+    writeFileSync(script, `import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+const [path, sqlFile] = process.argv.slice(2);
+const ms = JSON.parse(readFileSync(sqlFile, 'utf8'));
+const db = new DatabaseSync(path);
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('BEGIN IMMEDIATE');
+for (const m of ms) db.exec(m);
+db.exec('PRAGMA user_version = ' + ms.length);
+process.stdout.write('locked\\n');
+setTimeout(() => { db.exec('COMMIT'); db.close(); }, 700);
+`);
+    const child = spawn(process.execPath, [script, path, sqlFile], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const exited = new Promise<void>((done) => child.on('close', () => done()));
+    await new Promise<void>((done, fail) => {
+      child.stdout!.on('data', (c: Buffer) => { if (c.toString().includes('locked')) done(); });
+      child.on('close', () => fail(new Error('other process exited before locking')));
+    });
+    let err: unknown = null;
+    try { openDb(path).close(); } catch (e) { err = e; }
+    await exited;
+    expect(err).toBeNull();
+    expect(raw(path, 'PRAGMA user_version')[0].user_version).toBe(MIGRATIONS.length);
   });
 });

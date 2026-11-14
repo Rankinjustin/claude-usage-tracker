@@ -27,7 +27,7 @@ function runOpen(env: Record<string, string> = {}): Promise<{ code: number | nul
     const c: ChildProcess = spawn(process.execPath, ['dist/cli.mjs', 'open'], {
       env: {
         ...process.env, TOKEN_TRACKER_HOME: home, CLAUDE_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'tt-claude-')),
-        TOKEN_TRACKER_NO_BROWSER: '1', ...env,
+        TOKEN_TRACKER_NO_BROWSER: '1', TOKEN_TRACKER_NO_SPAWN: '1', ...env,
       },
     });
     let stdout = '';
@@ -48,6 +48,25 @@ test('reuses live server', async () => {
   expect(r.stdout).toBe(`Token Tracker: http://127.0.0.1:${srv.port}/?key=${srv.key}\n`);
   expect(readFileSync(join(home, 'server.json'), 'utf8')).toBe(before);
   expect(readFileSync(join(home, 'debug.log'), 'utf8')).toContain('browser open skipped: http://127.0.0.1');
+});
+
+test('open is a first-run entry point: writes installed.json and starts the backfill', async () => {
+  srv = await liveServer();
+  expect(existsSync(join(home, 'installed.json'))).toBe(false);
+  const r = await runOpen();
+  expect(r.code).toBe(0);
+  expect(JSON.parse(readFileSync(join(home, 'installed.json'), 'utf8')).installedAt).toBeTruthy();
+  const spawns = (): number => (readFileSync(join(home, 'debug.log'), 'utf8').match(/backfill spawn skipped/g) ?? []).length;
+  expect(spawns()).toBe(1);
+  // Second open: the marker exists, so only an abandoned backfill would spawn again. Record a finished one
+  // in the default store and expect no further spawn.
+  const { openDb } = await import('../src/store/db');
+  const db = openDb(join(home, 'tracker.db'));
+  db.meta.set('backfill_progress', JSON.stringify({ done: 1, total: 1, startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString() }));
+  db.close();
+  await runOpen();
+  expect(spawns()).toBe(1);
 });
 
 test('starts server when server.json is stale', async () => {

@@ -4,6 +4,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { priceCall } from '../../src/core/prices';
 import { indexAll, indexFile } from '../../src/ingest/indexer';
 import { openDb, type Db } from '../../src/store/db';
 
@@ -307,6 +308,9 @@ describe('indexer', () => {
     // The reference dedupes message ids per file; we dedupe globally. The only id that repeats across fixture
     // files (msg_...F6 in split-response.jsonl and system.jsonl) sits on a line with a raw control character that
     // both JSON parsers reject, so the expected difference is exactly 0.
+    // The reference also keeps the first part of a split response while we keep the largest output/thinking.
+    // Every split id in the fixtures (msg_...F6 x3, msg_...110 x4) has identical usage on all parts, so that
+    // difference is exactly 0 too.
     const crossFileDuplicateCost = 0;
     expect(Math.abs(totalCost(db) + crossFileDuplicateCost - ref.summary[0].total)).toBeLessThan(0.01);
     const short = (m: string): string => m.replace(/^claude-/, '');
@@ -317,5 +321,77 @@ describe('indexer', () => {
         : one(db, 'SELECT COALESCE(SUM(cost),0) c FROM api_calls WHERE model = ?', short(m.name)).c;
       expect(Math.abs(ours - m.cost), m.name).toBeLessThan(0.01);
     }
+  });
+
+  /** split-response.jsonl's prompt plus its three parts of one message, with output/thinking overridden. */
+  const splitBody = (usages: [number, number][]): string => {
+    const ls = fxLines('split-response.jsonl');
+    const parts = ls.slice(1, 4).map((l, i) => {
+      const j = JSON.parse(l);
+      j.message.usage.output_tokens = usages[i]![0];
+      j.message.usage.output_tokens_details = { thinking_tokens: usages[i]![1] };
+      return JSON.stringify(j);
+    });
+    return [ls[0], ...parts, ...ls.slice(4)].join('\n') + '\n';
+  };
+  const F6 = 'msg_FFFFFFFFFFFFFFFFFFFFFFF6';
+
+  it('split response keeps the largest output and thinking', () => {
+    const { proj, db } = setup();
+    const f = join(proj, `${SID(20)}.jsonl`);
+    // low, then high, then mid: the last part must not downgrade the stored row
+    writeFileSync(f, splitBody([[100, 10], [400, 40], [250, 25]]));
+    const r = indexFile(db, f);
+    expect(r.newCalls).toBe(1);
+    const row = one(db, 'SELECT * FROM api_calls WHERE message_id = ?', F6);
+    const first = JSON.parse(fxLines('split-response.jsonl')[1]!);
+    expect(row.ts).toBe(first.timestamp);
+    expect(row.prompt_uuid).toBe(JSON.parse(fxLines('split-response.jsonl')[0]!).uuid);
+    expect(row.output).toBe(400 - 40);
+    expect(row.thinking).toBe(40);
+    const u = first.message.usage;
+    const merged = { input: row.input, cacheWrite5m: row.cache_write_5m, cacheWrite1h: row.cache_write_1h,
+      cacheRead: row.cache_read, output: 360, thinking: 40 };
+    expect(row.input).toBe(u.input_tokens);
+    const pr = priceCall('opus-5-5', merged, row.ts, row.speed);
+    expect(row.cost).toBeCloseTo(pr.cost!, 10);
+    expect(JSON.parse(row.cost_parts_json)).toEqual(pr.parts);
+    expect(row.price_id).toBe(pr.priceId);
+    expect(JSON.parse(row.raw_json).message.usage.output_tokens).toBe(400);
+    expect(one(db, 'SELECT COUNT(*) n FROM advisor_calls').n).toBe(0);
+  });
+
+  it('migration triggers a re-read that corrects existing rows', () => {
+    const d = mkdtempSync(join(tmpdir(), 'tt idx '));
+    dirs.push(d);
+    const root = join(d, 'projects');
+    const proj = join(root, 'p');
+    mkdirSync(proj, { recursive: true });
+    const dbFile = join(d, 'tracker.db');
+    const f = join(proj, `${SID(21)}.jsonl`);
+    writeFileSync(f, splitBody([[100, 10], [400, 40], [400, 40]]));
+    let db = openDb(dbFile);
+    indexAll(db, { root });
+    // What an older build stored: the first part's output, thinking and cost.
+    db.raw.prepare('UPDATE api_calls SET output = 90, thinking = 10, cost = 0.001 WHERE message_id = ?').run(F6);
+    db.close();
+
+    db = openDb(dbFile); // control: an unchanged file is skipped, so the stale row stays
+    indexAll(db, { root });
+    expect(one(db, 'SELECT output FROM api_calls WHERE message_id = ?', F6).output).toBe(90);
+    db.raw.exec('PRAGMA user_version = 2');
+    db.close();
+
+    db = openDb(dbFile);
+    dbs.push(db);
+    expect(db.getFileState(f)?.offset).toBe(0);
+    const r = indexAll(db, { root });
+    expect(r.newCalls).toBe(0);
+    const row = one(db, 'SELECT output, thinking, cost FROM api_calls WHERE message_id = ?', F6);
+    expect(row).toMatchObject({ output: 360, thinking: 40 });
+    expect(row.cost).toBeGreaterThan(0.001);
+    expect(one(db, 'SELECT COUNT(*) n FROM api_calls').n).toBe(1);
+    expect(one(db, 'SELECT COUNT(*) n FROM prompts').n).toBe(1);
+    expect(one(db, 'SELECT COUNT(*) n FROM tool_calls').n).toBe(2);
   });
 });

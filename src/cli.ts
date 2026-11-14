@@ -48,7 +48,7 @@ function readStdin(): Promise<Record<string, unknown>> {
 function spawnBackfill(): void {
   // Tests set this so they never start a real backfill against the user's transcripts.
   if (process.env.TOKEN_TRACKER_NO_SPAWN) {
-    log('hook-start: backfill spawn skipped (TOKEN_TRACKER_NO_SPAWN)');
+    log('backfill spawn skipped (TOKEN_TRACKER_NO_SPAWN)');
     return;
   }
   const cli = fileURLToPath(import.meta.url);
@@ -83,9 +83,12 @@ async function repairSettings(): Promise<void> {
   }
 }
 
-async function hookStart(): Promise<void> {
+/**
+ * First run of any entry point (session start or `/spend`): records the install time and starts the backfill.
+ * Later runs restart a backfill that died before finishing.
+ */
+async function ensureFirstRun(): Promise<void> {
   ensureDataHome();
-  await repairSettings();
   const marker = stateFile('installed.json');
   if (existsSync(marker)) {
     if (await backfillAbandoned()) spawnBackfill();
@@ -93,6 +96,12 @@ async function hookStart(): Promise<void> {
   }
   writeFileSync(marker, JSON.stringify({ installedAt: new Date().toISOString() }), { mode: 0o600 });
   spawnBackfill();
+}
+
+async function hookStart(): Promise<void> {
+  ensureDataHome();
+  await repairSettings();
+  await ensureFirstRun();
 }
 
 /** Asks a live server to index; true only when it answered OK. */
@@ -198,7 +207,11 @@ function openBrowser(url: string): void {
 
 /** Finds or starts the server, opens the browser and prints the dashboard URL. */
 async function openDashboard(): Promise<void> {
-  ensureDataHome();
+  try {
+    await ensureFirstRun();
+  } catch (e) {
+    log(`open: first-run check failed: ${errText(e)}`); // never blocks opening the dashboard
+  }
   let info = readServerInfo();
   if (!info || !(await serverLive(info))) info = await startDetachedServer();
   if (!info) {

@@ -270,10 +270,13 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
       for (const c of clients) c.end();
       clients.clear();
       server.close(() => {
-        void Promise.resolve(current).catch(() => undefined).then(() => {
+        void (async () => {
+          // A caller already waiting in runIndex can start a new pass after this one ends, so wait until
+          // no pass is in flight. A failed pass was logged by runIndex.
+          while (current) { try { await current; } catch { /* logged */ } }
           try { db.close(); } catch { /* already closed */ }
           done();
-        });
+        })();
       });
       server.closeAllConnections();
     });

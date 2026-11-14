@@ -264,6 +264,29 @@ describe('views over hand-built data', () => {
     expect(agents(db, ALL).find((a) => a.type === 'main')!.cost).toBeCloseTo(11);
   });
 
+  it('coverage: a fully indexed transcript removed by Claude Code is not partial', () => {
+    const db = freshDb();
+    seedSession(db, 's1', [{ uuid: 'p1', ts: '2026-11-10T15:00:00.000Z', text: 'go' }]);
+    db.setFileState('/p/s1.jsonl', { size: 500, mtimeMs: 1, offset: 500, sessionId: 's1', runId: 'main:s1' });
+    db.markFileMissing('/p/s1.jsonl');
+    const cov = coverage(db);
+    expect(cov.sessionsPartial).toBe(0);
+    expect(cov.filesMissingBeforeIndexed).toBe(0);
+    expect(cov.sessionsComplete).toBe(1);
+  });
+
+  it('coverage: a transcript removed with unread bytes makes its session partial', () => {
+    const db = freshDb();
+    seedSession(db, 's1', [{ uuid: 'p1', ts: '2026-11-10T15:00:00.000Z', text: 'go' }]);
+    db.setFileState('/p/s1.jsonl', { size: 500, mtimeMs: 1, offset: 320, sessionId: 's1', runId: 'main:s1' });
+    db.markFileMissing('/p/s1.jsonl');
+    db.setFileState('/p/s1/subagents/agent-a.jsonl', { size: 9, mtimeMs: 1, offset: 9, sessionId: 's1', runId: 'a' });
+    const cov = coverage(db);
+    expect(cov.sessionsPartial).toBe(1);
+    expect(cov.filesMissingBeforeIndexed).toBe(1);
+    expect(cov.sessionsComplete).toBe(0);
+  });
+
   it('coverage reads installedAt from installed.json, falling back to backfill start', () => {
     const db = freshDb();
     expect(coverage(db).installedAt).toBeNull();

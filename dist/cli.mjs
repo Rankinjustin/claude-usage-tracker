@@ -179,6 +179,55 @@ var init_node_sqlite = __esm({
   }
 });
 
+// src/core/prices.ts
+function priceCall(model, tokens, at, speed = "standard") {
+  const atMs = Date.parse(at);
+  let r;
+  for (const p of PRICES) {
+    if (p.model !== model || Date.parse(p.effectiveFrom) > atMs) continue;
+    if (!r || Date.parse(p.effectiveFrom) > Date.parse(r.effectiveFrom)) r = p;
+  }
+  if (!r) return NONE;
+  let m2 = speed === "fast" && r.fastMultiplier ? r.fastMultiplier : 1;
+  const prompt = tokens.input + tokens.cacheWrite5m + tokens.cacheWrite1h + tokens.cacheRead;
+  if (r.longContextOver !== void 0 && prompt > r.longContextOver) m2 *= r.longContextMultiplier ?? 1;
+  const c = (n, rate) => n * rate * m2 / 1e6;
+  const parts = {
+    input: c(tokens.input, r.input),
+    cacheWrite5m: c(tokens.cacheWrite5m, r.cacheWrite5m),
+    cacheWrite1h: c(tokens.cacheWrite1h, r.cacheWrite1h),
+    cacheRead: c(tokens.cacheRead, r.cacheRead),
+    output: c(tokens.output, r.output),
+    thinking: c(tokens.thinking, r.output)
+  };
+  const cost = parts.input + parts.cacheWrite5m + parts.cacheWrite1h + parts.cacheRead + parts.output + parts.thinking;
+  return { cost, parts, priceId: r.id };
+}
+var row, PRICES, NONE;
+var init_prices = __esm({
+  "src/core/prices.ts"() {
+    "use strict";
+    row = (model, input, output, cacheWrite5m, cacheWrite1h, cacheRead, extra = {}) => ({
+      id: `${model}@2026-01-01`,
+      model,
+      effectiveFrom: "2026-01-01",
+      input,
+      output,
+      cacheWrite5m,
+      cacheWrite1h,
+      cacheRead,
+      ...extra
+    });
+    PRICES = [
+      row("fable-5-2", 8, 40, 10, 16, 0.2, { fastMultiplier: 2 }),
+      row("opus-5-5", 4, 20, 5, 8, 0.2, { fastMultiplier: 2 }),
+      row("sonnet-5-5", 2, 10, 2.5, 4, 0.1),
+      row("haiku-5-5", 0.1, 0.5, 0.125, 0.2, 0.01, { longContextOver: 1e5, longContextMultiplier: 5 })
+    ];
+    NONE = { cost: null, parts: null, priceId: null };
+  }
+});
+
 // raw:C:\Development and Programming\token-tracker\src\store\schema.sql
 var schema_default;
 var init_schema = __esm({
@@ -190,14 +239,20 @@ var init_schema = __esm({
 // src/store/db.ts
 var db_exports = {};
 __export(db_exports, {
+  MIGRATIONS: () => MIGRATIONS,
   openDb: () => openDb
 });
 import { chmodSync, closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2 } from "node:fs";
 function migrate(raw) {
-  const row2 = raw.prepare("PRAGMA user_version").get();
-  for (let v = row2.user_version; v < MIGRATIONS.length; v++) {
+  if (userVersion(raw) >= MIGRATIONS.length) return;
+  for (; ; ) {
     raw.exec("BEGIN IMMEDIATE");
     try {
+      const v = userVersion(raw);
+      if (v >= MIGRATIONS.length) {
+        raw.exec("COMMIT");
+        return;
+      }
       raw.exec(MIGRATIONS[v]);
       raw.exec(`PRAGMA user_version = ${v + 1}`);
       raw.exec("COMMIT");
@@ -212,10 +267,15 @@ function openDb(path) {
   const existed = existsSync2(path);
   if (!existed && process.platform !== "win32") closeSync2(openSync2(path, "a", 384));
   const raw = new DatabaseSync(path);
-  raw.exec("PRAGMA journal_mode = WAL");
-  raw.exec("PRAGMA foreign_keys = ON");
-  raw.exec("PRAGMA busy_timeout = 5000");
-  migrate(raw);
+  try {
+    raw.exec("PRAGMA busy_timeout = 5000");
+    raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec("PRAGMA foreign_keys = ON");
+    migrate(raw);
+  } catch (e) {
+    raw.close();
+    throw e;
+  }
   if (!existed && process.platform !== "win32") {
     try {
       chmodSync(path, 384);
@@ -251,6 +311,33 @@ function openDb(path) {
       t.toolUseId
     );
     run2("DELETE FROM pending_results WHERE tool_use_id = ?", t.toolUseId);
+  };
+  const growSplitResponse = (c) => {
+    const e = q(`SELECT model, ts, speed, input, cache_write_5m, cache_write_1h, cache_read, output, thinking
+      FROM api_calls WHERE message_id = ?`).get(c.messageId);
+    if (!e || c.tokens.output <= e.output && c.tokens.thinking <= e.thinking) return;
+    const tokens = {
+      input: e.input,
+      cacheWrite5m: e.cache_write_5m,
+      cacheWrite1h: e.cache_write_1h,
+      cacheRead: e.cache_read,
+      output: Math.max(e.output, c.tokens.output),
+      thinking: Math.max(e.thinking, c.tokens.thinking)
+    };
+    const pr = priceCall(e.model, tokens, e.ts, e.speed === "fast" ? "fast" : "standard");
+    const larger = c.tokens.output + c.tokens.thinking > e.output + e.thinking;
+    run2(
+      `UPDATE api_calls SET output=?, thinking=?, cost=?, cost_parts_json=?, price_id=?,
+        raw_json = CASE WHEN ? THEN ? ELSE raw_json END WHERE message_id=?`,
+      tokens.output,
+      tokens.thinking,
+      pr.cost,
+      pr.parts ? JSON.stringify(pr.parts) : null,
+      pr.priceId,
+      flag(larger),
+      c.rawJson,
+      c.messageId
+    );
   };
   let depth = 0;
   const db = {
@@ -336,6 +423,8 @@ function openDb(path) {
               a.cost
             );
           }
+        } else {
+          growSplitResponse(c);
         }
         for (const u of c.toolUses) {
           insertToolCall({
@@ -463,11 +552,12 @@ function openDb(path) {
   };
   return db;
 }
-var MIGRATIONS, flag;
+var MIGRATIONS, flag, userVersion;
 var init_db = __esm({
   "src/store/db.ts"() {
     "use strict";
     init_node_sqlite();
+    init_prices();
     init_paths();
     init_schema();
     MIGRATIONS = [
@@ -476,9 +566,14 @@ var init_db = __esm({
       `DELETE FROM compactions WHERE rowid NOT IN (SELECT MIN(rowid) FROM compactions GROUP BY session_id, ts);
    CREATE UNIQUE INDEX compactions_key ON compactions(session_id, ts);
    DELETE FROM hook_runs WHERE rowid NOT IN (SELECT MIN(rowid) FROM hook_runs GROUP BY session_id, ts, command);
-   CREATE UNIQUE INDEX hook_runs_key ON hook_runs(session_id, ts, command);`
+   CREATE UNIQUE INDEX hook_runs_key ON hook_runs(session_id, ts, command);`,
+      // v3: split responses now keep their largest output/thinking. Re-read every transcript still on disk so rows
+      // stored first-part-wins are corrected (all inserts are idempotent). Missing files cannot be re-read; their
+      // offset/size stay as they were because coverage() reads them.
+      `UPDATE files SET "offset" = 0, size = 0, mtime_ms = 0 WHERE missing = 0;`
     ];
     flag = (b) => b ? 1 : 0;
+    userVersion = (raw) => raw.prepare("PRAGMA user_version").get().user_version;
   }
 });
 
@@ -525,6 +620,8 @@ function repairStatusLine(cliPath) {
   const s = readSettings(file);
   const command = `node "${cliPath}" statusline`;
   if (!s.statusLine || !isOurs(s) || s.statusLine.command === command) return false;
+  const referenced = /^node "(.+)" statusline$/.exec(s.statusLine.command ?? "")?.[1];
+  if (!referenced || existsSync3(referenced)) return false;
   s.statusLine = { ...s.statusLine, command };
   writeAtomic(file, s);
   return true;
@@ -557,55 +654,6 @@ var init_setup = __esm({
       const c = s.statusLine?.command ?? "";
       return c.endsWith('cli.mjs" statusline') && /token-tracker/i.test(c);
     };
-  }
-});
-
-// src/core/prices.ts
-function priceCall(model, tokens, at, speed = "standard") {
-  const atMs = Date.parse(at);
-  let r;
-  for (const p of PRICES) {
-    if (p.model !== model || Date.parse(p.effectiveFrom) > atMs) continue;
-    if (!r || Date.parse(p.effectiveFrom) > Date.parse(r.effectiveFrom)) r = p;
-  }
-  if (!r) return NONE;
-  let m2 = speed === "fast" && r.fastMultiplier ? r.fastMultiplier : 1;
-  const prompt = tokens.input + tokens.cacheWrite5m + tokens.cacheWrite1h + tokens.cacheRead;
-  if (r.longContextOver !== void 0 && prompt > r.longContextOver) m2 *= r.longContextMultiplier ?? 1;
-  const c = (n, rate) => n * rate * m2 / 1e6;
-  const parts = {
-    input: c(tokens.input, r.input),
-    cacheWrite5m: c(tokens.cacheWrite5m, r.cacheWrite5m),
-    cacheWrite1h: c(tokens.cacheWrite1h, r.cacheWrite1h),
-    cacheRead: c(tokens.cacheRead, r.cacheRead),
-    output: c(tokens.output, r.output),
-    thinking: c(tokens.thinking, r.output)
-  };
-  const cost = parts.input + parts.cacheWrite5m + parts.cacheWrite1h + parts.cacheRead + parts.output + parts.thinking;
-  return { cost, parts, priceId: r.id };
-}
-var row, PRICES, NONE;
-var init_prices = __esm({
-  "src/core/prices.ts"() {
-    "use strict";
-    row = (model, input, output, cacheWrite5m, cacheWrite1h, cacheRead, extra = {}) => ({
-      id: `${model}@2026-01-01`,
-      model,
-      effectiveFrom: "2026-01-01",
-      input,
-      output,
-      cacheWrite5m,
-      cacheWrite1h,
-      cacheRead,
-      ...extra
-    });
-    PRICES = [
-      row("fable-5-2", 8, 40, 10, 16, 0.2, { fastMultiplier: 2 }),
-      row("opus-5-5", 4, 20, 5, 8, 0.2, { fastMultiplier: 2 }),
-      row("sonnet-5-5", 2, 10, 2.5, 4, 0.1),
-      row("haiku-5-5", 0.1, 0.5, 0.125, 0.2, 0.01, { longContextOver: 1e5, longContextMultiplier: 5 })
-    ];
-    NONE = { cost: null, parts: null, priceId: null };
   }
 });
 
@@ -1552,7 +1600,7 @@ function installedAt() {
 }
 function coverage(db) {
   const n = (sql) => all(db, sql)[0].n;
-  const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE missing = 1 AND session_id IS NOT NULL`);
+  const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE ${LOST_FILE} AND session_id IS NOT NULL`);
   let progress = null;
   try {
     progress = JSON.parse(db.meta.get("backfill_progress") ?? "null");
@@ -1563,7 +1611,7 @@ function coverage(db) {
     installedAt: installedAt() ?? started,
     sessionsComplete: n("SELECT COUNT(*) AS n FROM sessions") - sessionsPartial,
     sessionsPartial,
-    filesMissingBeforeIndexed: n("SELECT COUNT(*) AS n FROM files WHERE missing = 1"),
+    filesMissingBeforeIndexed: n(`SELECT COUNT(*) AS n FROM files WHERE ${LOST_FILE}`),
     backfillProgress: progress
   };
 }
@@ -1583,7 +1631,7 @@ function statusLine(db, sessionId, now) {
   const alerts = allRuns(db, rg.from).filter((x) => x.flagged && x.start >= rg.from && x.start < rg.to).length;
   return { today, session, alerts };
 }
-var PART_KEYS, COL, BUILT_IN, FLAG_MULTIPLE, FLAG_MIN_PRIOR, SPARK_RUNS, WITH_CALLS, CALL_COST, pct, sumTokens, toRunRow;
+var PART_KEYS, COL, BUILT_IN, FLAG_MULTIPLE, FLAG_MIN_PRIOR, SPARK_RUNS, WITH_CALLS, CALL_COST, pct, sumTokens, toRunRow, LOST_FILE;
 var init_views = __esm({
   "src/query/views.ts"() {
     "use strict";
@@ -1624,6 +1672,7 @@ calls AS (
     pct = (part, whole) => whole > 0 ? part / whole * 100 : 0;
     sumTokens = (t) => Object.values(t).reduce((a, b) => a + b, 0);
     toRunRow = ({ sessionId, ctxSum, toolCalls, toolErrors, ...run2 }) => run2;
+    LOST_FILE = `missing = 1 AND "offset" < size`;
   }
 });
 
@@ -1876,13 +1925,19 @@ async function startServer(opts = {}) {
       for (const c of clients) c.end();
       clients.clear();
       server.close(() => {
-        void Promise.resolve(current).catch(() => void 0).then(() => {
+        void (async () => {
+          while (current) {
+            try {
+              await current;
+            } catch {
+            }
+          }
           try {
             db.close();
           } catch {
           }
           done();
-        });
+        })();
       });
       server.closeAllConnections();
     });
@@ -1980,12 +2035,12 @@ async function statusLineText(stdin) {
         raw.exec("PRAGMA busy_timeout = 200");
         const { statusLine: statusLine2 } = await Promise.resolve().then(() => (init_views(), views_exports));
         const s = statusLine2({ raw }, sessionId ?? "");
-        return formatStatusLine({
-          today: s.today,
-          session: sessionId === null ? null : s.session,
-          alerts: s.alerts,
-          contextTokens
-        });
+        let { today, session } = s;
+        if (sessionId !== null && stdinCost !== null && stdinCost > s.session) {
+          today += stdinCost - s.session;
+          session = stdinCost;
+        }
+        return formatStatusLine({ today, session: sessionId === null ? null : session, alerts: s.alerts, contextTokens });
       } finally {
         raw.close();
       }
@@ -2060,7 +2115,7 @@ function readStdin() {
 }
 function spawnBackfill() {
   if (process.env.TOKEN_TRACKER_NO_SPAWN) {
-    log("hook-start: backfill spawn skipped (TOKEN_TRACKER_NO_SPAWN)");
+    log("backfill spawn skipped (TOKEN_TRACKER_NO_SPAWN)");
     return;
   }
   const cli = fileURLToPath2(import.meta.url);
@@ -2091,9 +2146,8 @@ async function repairSettings() {
     log(`status line repair failed: ${errText(e)}`);
   }
 }
-async function hookStart() {
+async function ensureFirstRun() {
   ensureDataHome();
-  await repairSettings();
   const marker = stateFile("installed.json");
   if (existsSync8(marker)) {
     if (await backfillAbandoned()) spawnBackfill();
@@ -2101,6 +2155,11 @@ async function hookStart() {
   }
   writeFileSync3(marker, JSON.stringify({ installedAt: (/* @__PURE__ */ new Date()).toISOString() }), { mode: 384 });
   spawnBackfill();
+}
+async function hookStart() {
+  ensureDataHome();
+  await repairSettings();
+  await ensureFirstRun();
 }
 async function pokeServer() {
   try {
@@ -2187,7 +2246,11 @@ function openBrowser(url) {
   }
 }
 async function openDashboard() {
-  ensureDataHome();
+  try {
+    await ensureFirstRun();
+  } catch (e) {
+    log(`open: first-run check failed: ${errText(e)}`);
+  }
   let info = readServerInfo();
   if (!info || !await serverLive(info)) info = await startDetachedServer();
   if (!info) {

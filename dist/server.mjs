@@ -1100,9 +1100,10 @@ function installedAt() {
     return null;
   }
 }
+var LOST_FILE = `missing = 1 AND "offset" < size`;
 function coverage(db) {
   const n = (sql) => all(db, sql)[0].n;
-  const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE missing = 1 AND session_id IS NOT NULL`);
+  const sessionsPartial = n(`SELECT COUNT(DISTINCT session_id) AS n FROM files WHERE ${LOST_FILE} AND session_id IS NOT NULL`);
   let progress = null;
   try {
     progress = JSON.parse(db.meta.get("backfill_progress") ?? "null");
@@ -1113,7 +1114,7 @@ function coverage(db) {
     installedAt: installedAt() ?? started,
     sessionsComplete: n("SELECT COUNT(*) AS n FROM sessions") - sessionsPartial,
     sessionsPartial,
-    filesMissingBeforeIndexed: n("SELECT COUNT(*) AS n FROM files WHERE missing = 1"),
+    filesMissingBeforeIndexed: n(`SELECT COUNT(*) AS n FROM files WHERE ${LOST_FILE}`),
     backfillProgress: progress
   };
 }
@@ -1132,14 +1133,24 @@ var MIGRATIONS = [
   `DELETE FROM compactions WHERE rowid NOT IN (SELECT MIN(rowid) FROM compactions GROUP BY session_id, ts);
    CREATE UNIQUE INDEX compactions_key ON compactions(session_id, ts);
    DELETE FROM hook_runs WHERE rowid NOT IN (SELECT MIN(rowid) FROM hook_runs GROUP BY session_id, ts, command);
-   CREATE UNIQUE INDEX hook_runs_key ON hook_runs(session_id, ts, command);`
+   CREATE UNIQUE INDEX hook_runs_key ON hook_runs(session_id, ts, command);`,
+  // v3: split responses now keep their largest output/thinking. Re-read every transcript still on disk so rows
+  // stored first-part-wins are corrected (all inserts are idempotent). Missing files cannot be re-read; their
+  // offset/size stay as they were because coverage() reads them.
+  `UPDATE files SET "offset" = 0, size = 0, mtime_ms = 0 WHERE missing = 0;`
 ];
 var flag = (b) => b ? 1 : 0;
+var userVersion = (raw) => raw.prepare("PRAGMA user_version").get().user_version;
 function migrate(raw) {
-  const row2 = raw.prepare("PRAGMA user_version").get();
-  for (let v = row2.user_version; v < MIGRATIONS.length; v++) {
+  if (userVersion(raw) >= MIGRATIONS.length) return;
+  for (; ; ) {
     raw.exec("BEGIN IMMEDIATE");
     try {
+      const v = userVersion(raw);
+      if (v >= MIGRATIONS.length) {
+        raw.exec("COMMIT");
+        return;
+      }
       raw.exec(MIGRATIONS[v]);
       raw.exec(`PRAGMA user_version = ${v + 1}`);
       raw.exec("COMMIT");
@@ -1154,10 +1165,15 @@ function openDb(path) {
   const existed = existsSync4(path);
   if (!existed && process.platform !== "win32") closeSync3(openSync3(path, "a", 384));
   const raw = new DatabaseSync(path);
-  raw.exec("PRAGMA journal_mode = WAL");
-  raw.exec("PRAGMA foreign_keys = ON");
-  raw.exec("PRAGMA busy_timeout = 5000");
-  migrate(raw);
+  try {
+    raw.exec("PRAGMA busy_timeout = 5000");
+    raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec("PRAGMA foreign_keys = ON");
+    migrate(raw);
+  } catch (e) {
+    raw.close();
+    throw e;
+  }
   if (!existed && process.platform !== "win32") {
     try {
       chmodSync(path, 384);
@@ -1193,6 +1209,33 @@ function openDb(path) {
       t.toolUseId
     );
     run("DELETE FROM pending_results WHERE tool_use_id = ?", t.toolUseId);
+  };
+  const growSplitResponse = (c) => {
+    const e = q(`SELECT model, ts, speed, input, cache_write_5m, cache_write_1h, cache_read, output, thinking
+      FROM api_calls WHERE message_id = ?`).get(c.messageId);
+    if (!e || c.tokens.output <= e.output && c.tokens.thinking <= e.thinking) return;
+    const tokens = {
+      input: e.input,
+      cacheWrite5m: e.cache_write_5m,
+      cacheWrite1h: e.cache_write_1h,
+      cacheRead: e.cache_read,
+      output: Math.max(e.output, c.tokens.output),
+      thinking: Math.max(e.thinking, c.tokens.thinking)
+    };
+    const pr = priceCall(e.model, tokens, e.ts, e.speed === "fast" ? "fast" : "standard");
+    const larger = c.tokens.output + c.tokens.thinking > e.output + e.thinking;
+    run(
+      `UPDATE api_calls SET output=?, thinking=?, cost=?, cost_parts_json=?, price_id=?,
+        raw_json = CASE WHEN ? THEN ? ELSE raw_json END WHERE message_id=?`,
+      tokens.output,
+      tokens.thinking,
+      pr.cost,
+      pr.parts ? JSON.stringify(pr.parts) : null,
+      pr.priceId,
+      flag(larger),
+      c.rawJson,
+      c.messageId
+    );
   };
   let depth = 0;
   const db = {
@@ -1278,6 +1321,8 @@ function openDb(path) {
               a.cost
             );
           }
+        } else {
+          growSplitResponse(c);
         }
         for (const u of c.toolUses) {
           insertToolCall({
@@ -1669,13 +1714,19 @@ async function startServer(opts = {}) {
       for (const c of clients) c.end();
       clients.clear();
       server.close(() => {
-        void Promise.resolve(current).catch(() => void 0).then(() => {
+        void (async () => {
+          while (current) {
+            try {
+              await current;
+            } catch {
+            }
+          }
           try {
             db.close();
           } catch {
           }
           done();
-        });
+        })();
       });
       server.closeAllConnections();
     });
