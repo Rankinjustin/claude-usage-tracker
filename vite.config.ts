@@ -5,6 +5,6 @@ export default defineConfig({
   root: 'src/ui',
   base: './',
   plugins: [react()],
-  build: { outDir: '../../dist/ui', emptyOutDir: true },
+  build: { outDir: '../../dist/ui', emptyOutDir: true, assetsInlineLimit: 0 },
   test: { root: '.', environment: 'node', include: ['test/**/*.test.{ts,tsx}'] },
 });
