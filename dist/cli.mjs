@@ -1066,6 +1066,18 @@ var init_ranges = __esm({
 });
 
 // src/query/views.ts
+var views_exports = {};
+__export(views_exports, {
+  agentDetail: () => agentDetail,
+  agents: () => agents,
+  coverage: () => coverage,
+  overview: () => overview,
+  promptDetail: () => promptDetail,
+  prompts: () => prompts,
+  sessionDetail: () => sessionDetail,
+  sessions: () => sessions,
+  statusLine: () => statusLine
+});
 import { existsSync as existsSync4, readFileSync as readFileSync3 } from "node:fs";
 function all(db, sql, ...p) {
   return db.raw.prepare(sql).all(...p);
@@ -1477,6 +1489,22 @@ function coverage(db) {
     backfillProgress: progress
   };
 }
+function statusLine(db, sessionId, now) {
+  const rg = resolveRange({ preset: "today" }, now);
+  const today = all(
+    db,
+    `${WITH_CALLS} SELECT COALESCE(SUM(${CALL_COST}), 0) AS c FROM calls WHERE ts >= ? AND ts < ?`,
+    rg.from,
+    rg.to
+  )[0].c;
+  const session = all(
+    db,
+    `${WITH_CALLS} SELECT COALESCE(SUM(${CALL_COST}), 0) AS c FROM calls WHERE session_id = ?`,
+    sessionId
+  )[0].c;
+  const alerts = allRuns(db, rg.from).filter((x) => x.flagged && x.start >= rg.from && x.start < rg.to).length;
+  return { today, session, alerts };
+}
 var PART_KEYS, COL, BUILT_IN, FLAG_MULTIPLE, FLAG_MIN_PRIOR, SPARK_RUNS, WITH_CALLS, CALL_COST, pct, sumTokens, toRunRow;
 var init_views = __esm({
   "src/query/views.ts"() {
@@ -1844,13 +1872,136 @@ var init_server = __esm({
   }
 });
 
+// src/statusline.ts
+var statusline_exports = {};
+__export(statusline_exports, {
+  formatStatusLine: () => formatStatusLine,
+  statusLineText: () => statusLineText
+});
+import { existsSync as existsSync6 } from "node:fs";
+function formatStatusLine(p) {
+  if (p.today === null && p.session === null && p.contextTokens === null) return "\u25AE\u25AE\u25AE Token Tracker";
+  const out = [`\u25AE\u25AE\u25AE ${p.today === null ? "today \u2014" : `${money(p.today)} today`}`];
+  if (p.session !== null) out.push(`session ${money(p.session)}`);
+  if (p.contextTokens !== null) out.push(`context ${Math.round(p.contextTokens / 1e3)}K`);
+  if (p.alerts > 0) out.push(`\u25B2 ${p.alerts} alert${p.alerts === 1 ? "" : "s"}`);
+  return out.join(" \xB7 ");
+}
+async function statusLineText(stdin) {
+  const sessionId = typeof stdin.session_id === "string" ? stdin.session_id : null;
+  const stdinCost = num2(obj(stdin.cost).total_cost_usd);
+  const cw = obj(stdin.context_window);
+  const pct2 = num2(cw.used_percentage);
+  const size = num2(cw.context_window_size);
+  const contextTokens = pct2 !== null && size !== null ? pct2 * size / 100 : null;
+  try {
+    const path = dbPath();
+    if (existsSync6(path)) {
+      const raw = new DatabaseSync(path, { readOnly: true });
+      try {
+        raw.exec("PRAGMA busy_timeout = 200");
+        const { statusLine: statusLine2 } = await Promise.resolve().then(() => (init_views(), views_exports));
+        const s = statusLine2({ raw }, sessionId ?? "");
+        return formatStatusLine({
+          today: s.today,
+          session: sessionId === null ? null : s.session,
+          alerts: s.alerts,
+          contextTokens
+        });
+      } finally {
+        raw.close();
+      }
+    }
+  } catch {
+  }
+  return formatStatusLine({ today: null, session: stdinCost, alerts: 0, contextTokens });
+}
+var money, num2, obj;
+var init_statusline = __esm({
+  "src/statusline.ts"() {
+    "use strict";
+    init_node_sqlite();
+    init_paths();
+    money = (n) => `$${n.toFixed(2)}`;
+    num2 = (v) => typeof v === "number" && Number.isFinite(v) ? v : null;
+    obj = (v) => v && typeof v === "object" ? v : {};
+  }
+});
+
+// src/setup.ts
+var setup_exports = {};
+__export(setup_exports, {
+  settingsPath: () => settingsPath,
+  setupApply: () => setupApply,
+  setupCheck: () => setupCheck
+});
+import { copyFileSync, existsSync as existsSync7, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, join as join4 } from "node:path";
+function settingsPath() {
+  return join4(process.env.CLAUDE_CONFIG_DIR || join4(homedir2(), ".claude"), "settings.json");
+}
+function readSettings(file) {
+  if (!existsSync7(file)) return {};
+  const parsed = JSON.parse(readFileSync5(file, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("settings.json is not a JSON object");
+  return parsed;
+}
+function setupCheck() {
+  const file = settingsPath();
+  let s;
+  try {
+    s = readSettings(file);
+  } catch (e) {
+    return `Status line: unknown (${e.message})`;
+  }
+  if (!s.statusLine) return "Status line: not set";
+  return isOurs(s) ? "Status line: Token Tracker" : `Status line: other (${s.statusLine.command ?? "?"})`;
+}
+function setupApply(cliPath, replace) {
+  const file = settingsPath();
+  let s;
+  try {
+    s = readSettings(file);
+  } catch (e) {
+    return `Not changed: ${file} could not be read as JSON (${e.message}). Fix or remove it and retry.`;
+  }
+  const command = `node "${cliPath}" statusline`;
+  if (s.statusLine && s.statusLine.command === command) return "Status line already installed; nothing changed.";
+  if (s.statusLine && !isOurs(s) && !replace) {
+    return `Not changed: a different status line is already set (${s.statusLine.command ?? "?"}). Run setup --apply --replace to replace it (a backup is kept).`;
+  }
+  mkdirSync2(dirname2(file), { recursive: true });
+  if (existsSync7(file)) copyFileSync(file, `${file}.bak-token-tracker`);
+  s.statusLine = { type: "command", command };
+  const tmp = `${file}.tt-tmp`;
+  writeFileSync2(tmp, `${JSON.stringify(s, null, 2)}
+`);
+  renameSync2(tmp, file);
+  return `Status line installed in ${file}.`;
+}
+var isOurs;
+var init_setup = __esm({
+  "src/setup.ts"() {
+    "use strict";
+    isOurs = (s) => /cli\.mjs"? statusline$/.test(s.statusLine?.command ?? "");
+  }
+});
+
 // src/cli.ts
 init_log();
 init_paths();
-init_lock();
 import { spawn } from "node:child_process";
-import { existsSync as existsSync6, readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync6, writeFileSync as writeFileSync3 } from "node:fs";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// src/core/safeUrl.ts
+function isSafeDashboardUrl(url) {
+  return /^http:\/\/127\.0\.0\.1:\d+\/\?key=[0-9a-f]+$/.test(url);
+}
+
+// src/cli.ts
+init_lock();
 var MIN_NODE = [22, 13, 0];
 function nodeTooOld(version) {
   const v = version.split(".").map((n) => parseInt(n, 10) || 0);
@@ -1917,18 +2068,18 @@ async function backfillAbandoned() {
 async function hookStart() {
   ensureDataHome();
   const marker = stateFile("installed.json");
-  if (existsSync6(marker)) {
+  if (existsSync8(marker)) {
     if (await backfillAbandoned()) spawnBackfill();
     return;
   }
-  writeFileSync2(marker, JSON.stringify({ installedAt: (/* @__PURE__ */ new Date()).toISOString() }), { mode: 384 });
+  writeFileSync3(marker, JSON.stringify({ installedAt: (/* @__PURE__ */ new Date()).toISOString() }), { mode: 384 });
   spawnBackfill();
 }
 async function pokeServer() {
   try {
     const file = stateFile("server.json");
-    if (!existsSync6(file)) return false;
-    const { pid, port, key } = JSON.parse(readFileSync5(file, "utf8"));
+    if (!existsSync8(file)) return false;
+    const { pid, port, key } = JSON.parse(readFileSync6(file, "utf8"));
     if (!pidAlive(pid)) return false;
     const res = await fetch(`http://127.0.0.1:${port}/api/poke`, {
       method: "POST",
@@ -1958,8 +2109,8 @@ var summary = (r) => `indexed ${r.files} files, ${r.newCalls} new calls, ${r.new
 function readServerInfo() {
   try {
     const file = stateFile("server.json");
-    if (!existsSync6(file)) return null;
-    const i = JSON.parse(readFileSync5(file, "utf8"));
+    if (!existsSync8(file)) return null;
+    const i = JSON.parse(readFileSync6(file, "utf8"));
     if (typeof i.pid !== "number" || typeof i.port !== "number" || typeof i.key !== "string") return null;
     return { pid: i.pid, port: i.port, key: i.key, startedAt: String(i.startedAt ?? "") };
   } catch {
@@ -1993,6 +2144,10 @@ async function startDetachedServer() {
 function openBrowser(url) {
   if (process.env.TOKEN_TRACKER_NO_BROWSER) {
     log(`browser open skipped: ${url}`);
+    return;
+  }
+  if (!isSafeDashboardUrl(url)) {
+    log(`browser open refused: unexpected url ${JSON.stringify(url)}`);
     return;
   }
   try {
@@ -2070,6 +2225,18 @@ async function run(sub) {
     case "open":
       await openDashboard();
       return;
+    case "statusline": {
+      const { statusLineText: statusLineText2 } = await Promise.resolve().then(() => (init_statusline(), statusline_exports));
+      console.log(await statusLineText2(await readStdin()));
+      return;
+    }
+    case "setup": {
+      const { setupApply: setupApply2, setupCheck: setupCheck2 } = await Promise.resolve().then(() => (init_setup(), setup_exports));
+      const args = process.argv.slice(3);
+      if (args.includes("--apply")) console.log(setupApply2(fileURLToPath2(import.meta.url), args.includes("--replace")));
+      else console.log(setupCheck2());
+      return;
+    }
     default:
       console.error(`token-tracker: unknown command "${sub}"`);
   }

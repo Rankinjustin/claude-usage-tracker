@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { log } from './core/log';
 import { dbPath, ensureDataHome, stateFile } from './core/paths';
+import { isSafeDashboardUrl } from './core/safeUrl';
 import { pidAlive, withWriteLock } from './ingest/lock';
 
 const MIN_NODE = [22, 13, 0];
@@ -167,6 +168,10 @@ function openBrowser(url: string): void {
     log(`browser open skipped: ${url}`);
     return;
   }
+  if (!isSafeDashboardUrl(url)) {
+    log(`browser open refused: unexpected url ${JSON.stringify(url)}`);
+    return;
+  }
   try {
     // `start` takes the first quoted argument as a window title, so one is supplied.
     const [cmd, args]: [string, string[]] =
@@ -241,6 +246,18 @@ async function run(sub: string): Promise<void> {
     case 'open':
       await openDashboard();
       return;
+    case 'statusline': {
+      const { statusLineText } = await import('./statusline');
+      console.log(await statusLineText(await readStdin()));
+      return;
+    }
+    case 'setup': {
+      const { setupApply, setupCheck } = await import('./setup');
+      const args = process.argv.slice(3);
+      if (args.includes('--apply')) console.log(setupApply(fileURLToPath(import.meta.url), args.includes('--replace')));
+      else console.log(setupCheck());
+      return;
+    }
     default:
       console.error(`token-tracker: unknown command "${sub}"`);
   }
