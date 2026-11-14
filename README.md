@@ -37,12 +37,12 @@ A session-end hook records each session, even if you never open the dashboard.
 
 Everything lives in `~/.claude/token-tracker/`. Set `TOKEN_TRACKER_HOME` to use another folder.
 
-Recorded per session: model usage per call, token counts by type, estimated cost, tool calls, agent and skill runs, file paths, and the **full text of your prompts**. None of it leaves your machine.
+Recorded per session: model usage per call, token counts by type, estimated cost, tool calls, agent and skill runs, the **full text of your prompts**, and the **full tool inputs** (commands, file paths and any content passed to tools, which can include secrets). None of it leaves your machine.
 
 ## Privacy and security
 
 - The server listens on loopback only. Every request needs the access key.
-- The plugin only reads `~/.claude/projects`. It writes only to its own data folder.
+- The plugin only reads `~/.claude/projects`. It writes only to its own data folder, apart from the status line setting you approve with `/token-tracker:setup` (which it keeps pointed at the current plugin version).
 - The app makes no outbound network calls. Fonts and scripts are bundled.
 - Costs are estimates at API list prices. They are not your bill. A subscription plan is billed differently.
 - Models with no known price are shown as unpriced, not guessed.
