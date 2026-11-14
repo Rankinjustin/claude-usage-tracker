@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useApi, type Overview as OverviewData, type PromptRow } from '../api';
+import { useApi, type Overview as OverviewData, type PromptRow, type Range } from '../api';
 import { BarChart, ChartTip } from '../components/BarChart';
 import { Private } from '../components/HideTextToggle';
 import { Kpi } from '../components/Kpi';
@@ -12,6 +12,35 @@ import { LoadState, ViewHead, type ViewProps } from './ViewHead';
 
 const TOP_PROMPTS = 6;
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+const localKey = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+/**
+ * Every local day of the range with its spend, zero for idle days, so gaps show as gaps. Presets cover their
+ * full 1, 7 or 30 days ending today; other ranges cover first to last recorded day.
+ */
+export function fillDays(daily: OverviewData['daily'], range: Range): { day: string; cost: number }[] {
+  const n = 'preset' in range ? { today: 1, week: 7, month: 30, all: 0 }[range.preset] : 0;
+  const keys = daily.map((d) => d.day);
+  let start: Date, end: Date;
+  if (n > 0) {
+    end = new Date();
+    start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (n - 1));
+  } else {
+    if (keys.length === 0) return [];
+    const [y0, m0, d0] = keys[0]!.split('-').map(Number);
+    const [y1, m1, d1] = keys[keys.length - 1]!.split('-').map(Number);
+    start = new Date(y0!, m0! - 1, d0!);
+    end = new Date(y1!, m1! - 1, d1!);
+  }
+  const cost = new Map(daily.map((d) => [d.day, d.cost]));
+  const out: { day: string; cost: number }[] = [];
+  for (let d = new Date(start); localKey(d) <= localKey(end); d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)) {
+    out.push({ day: localKey(d), cost: cost.get(localKey(d)) ?? 0 });
+  }
+  return out;
+}
 
 function Delta({ now, prev }: { now: number; prev: number }) {
   if (prev <= 0) return <>no earlier period to compare</>;
@@ -50,6 +79,7 @@ function Heatmap({ heat }: { heat: OverviewData['heat'] }) {
 export function Overview({ range, onRange, overview: o }: ViewProps) {
   const top = useApi<PromptRow[]>('prompts');
   const words = rangeWords(range);
+  const days = o ? fillDays(o.daily, range) : [];
   const prompts = [...(top.data ?? [])].sort((a, b) => b.total - a.total).slice(0, TOP_PROMPTS).filter((p) => p.total > 0);
   const fine = o && o.unpricedCalls > 0
     ? <>Costs at API list prices. <span className="warn">{plural(o.unpricedCalls, 'call')} on an unknown model {o.unpricedCalls === 1 ? 'is' : 'are'} unpriced</span> and left out of the totals.</>
@@ -75,9 +105,9 @@ export function Overview({ range, onRange, overview: o }: ViewProps) {
           <div className="section grid-2">
             <div className="card">
               <div className="chart-h">Daily spend <span>local days</span></div>
-              <BarChart label={`Daily spend, ${o.daily.length} days`} format={money}
-                bars={o.daily.map((d) => ({ value: d.cost, tip: dayKey(d.day), tipSub: money(d.cost) }))}
-                xLabels={o.daily.length ? [dayKey(o.daily[0]!.day), dayKey(o.daily[o.daily.length - 1]!.day)] : undefined} />
+              <BarChart label={`Daily spend, ${days.length} days`} format={money}
+                bars={days.some((d) => d.cost > 0) ? days.map((d) => ({ value: d.cost, tip: dayKey(d.day), tipSub: money(d.cost) })) : []}
+                xLabels={days.length ? [dayKey(days[0]!.day), dayKey(days[days.length - 1]!.day)] : undefined} />
             </div>
             <div className="card">
               <div className="chart-h">When you spend <span>day × hour</span></div>

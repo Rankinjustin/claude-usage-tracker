@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useApi, type PromptRow } from '../api';
-import { Private } from '../components/HideTextToggle';
+import { Private, useMask } from '../components/HideTextToggle';
 import { Kpi } from '../components/Kpi';
 import { rangeWords } from '../components/RangeControl';
 import { count, duration, money, plural, when } from '../format';
@@ -31,8 +31,9 @@ export function Prompts({ range, onRange, selected }: ViewProps) {
   const priciest = list.reduce<PromptRow | null>((m, p) => (!m || p.total > m.total ? p : m), null);
   const flagged = list.filter((p) => (p.multipleOfMedian ?? 0) >= FLAG_MEDIAN).length;
   const words = rangeWords(range);
+  const mask = useMask();
   const lede = !data ? 'Every prompt you sent, with what it cost.' : list.length === 0
-    ? (needle ? `No prompts ${words} match “${needle}”.` : `No prompts ${words}.`)
+    ? (needle ? `No prompts ${words} match “${mask(needle)}”.` : `No prompts ${words}.`)
     : <>{plural(list.length, 'prompt')}{needle ? ' match' : ''} {words}, <b className="num">{money(total)}</b> in all including the agents they launched.</>;
   return (
     <>
