@@ -59,7 +59,7 @@ export function BarChart({ bars, label, format, height = 120, reference, referen
             <rect key={i} className={`bar${onSelect ? ' click' : ''}${lit === i ? ' lit' : ''}`}
               x={cx(i) - bw / 2} y={top} width={bw} height={base - top} rx={Math.min(2, bw / 3)}
               fill={b.hot ? 'var(--serious)' : (b.color ?? 'var(--s1)')}
-              tabIndex={0} aria-label={`${b.tip}${b.tipSub ? `, ${b.tipSub}` : ''}`}
+              tabIndex={0} aria-label={`${b.tip}${b.tipSub ? `, ${b.tipSub}` : ''}${b.hot ? ', flagged' : ''}`}
               onMouseEnter={() => setLit(i)} onFocus={() => setLit(i)} onBlur={() => setLit(null)}
               onClick={onSelect ? () => onSelect(i) : undefined}
               onKeyDown={onSelect ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(i); } } : undefined} />

@@ -1,10 +1,38 @@
 import type { Coverage } from '../api';
 import { count } from '../format';
 
-/** True while the first-run backfill is reading old transcripts. */
-export function backfillRunning(c: Coverage | null): boolean {
+/** Same window as cli.ts BACKFILL_STALE_MS: an unfinished backfill older than this is treated as dead. */
+export const BACKFILL_STALE_MS = 15 * 60 * 1000;
+
+/**
+ * True while the first-run backfill is reading old transcripts: started, not finished, and started less than
+ * BACKFILL_STALE_MS ago (a backfill that died never writes finishedAt). Drives both the polling and the UI.
+ */
+export function backfillRunning(c: Coverage | null, now = Date.now()): boolean {
   const p = c?.backfillProgress;
-  return !!p && !p.finishedAt;
+  if (!p || p.finishedAt || !p.startedAt) return false;
+  const age = now - Date.parse(p.startedAt);
+  return age >= 0 && age < BACKFILL_STALE_MS;
+}
+
+function progressOf(c: Coverage): { done: number; total: number; pct: number } {
+  const p = c.backfillProgress;
+  const done = p?.done ?? 0, total = p?.total ?? 0;
+  return { done, total, pct: total > 0 ? Math.round((done / total) * 100) : 0 };
+}
+
+/** Thin progress strip shown above a normal view while a backfill runs and some data is already in. */
+export function BackfillBanner({ coverage }: { coverage: Coverage }) {
+  const { done, total, pct } = progressOf(coverage);
+  return (
+    <div className="backfill-banner">
+      <span>Reading your Claude Code history: <span className="num">{total > 0 ? `${count(done)} of ${count(total)} files` : 'finding transcript files'}</span>. Figures fill in as it goes.</span>
+      <div className="progress" role="progressbar" aria-label="Transcript files indexed" aria-valuemin={0}
+        aria-valuemax={100} aria-valuenow={pct}>
+        <i style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
 }
 
 /** True when nothing has been recorded at all (as opposed to an empty range). */
@@ -14,9 +42,8 @@ export function storeEmpty(c: Coverage | null): boolean {
 
 /** First-run screen: backfill progress while history is read, or a short note when there is nothing yet. */
 export function EmptyState({ coverage }: { coverage: Coverage }) {
-  const p = coverage.backfillProgress;
   const running = backfillRunning(coverage);
-  const pctDone = p && p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+  const { done, total, pct: pctDone } = progressOf(coverage);
   const filled = Math.round(pctDone / 12.5);
   return (
     <section className="empty" aria-labelledby="empty-h">
@@ -33,7 +60,7 @@ export function EmptyState({ coverage }: { coverage: Coverage }) {
             <i style={{ width: `${pctDone}%` }} />
           </div>
           <div className="progress-label">
-            <span className="num">{p && p.total > 0 ? `${count(p.done)} of ${count(p.total)} files` : 'Finding transcript files'}</span>
+            <span className="num">{total > 0 ? `${count(done)} of ${count(total)} files` : 'Finding transcript files'}</span>
             <span className="num">{pctDone}%</span>
           </div>
         </>

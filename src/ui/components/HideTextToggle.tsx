@@ -18,6 +18,10 @@ export function HideTextProvider({ children }: { children: ReactNode }) {
   return <HideTextContext.Provider value={{ hidden, toggle }}>{children}</HideTextContext.Provider>;
 }
 
+export function useHidden(): boolean {
+  return useContext(HideTextContext).hidden;
+}
+
 /** Returns a function that masks prompt text, titles and paths while hide-text is on. */
 export function useMask(): (text: string | null | undefined, fallback?: string) => string {
   const { hidden } = useContext(HideTextContext);

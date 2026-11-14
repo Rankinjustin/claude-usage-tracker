@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useApi, type PromptRow } from '../api';
-import { Private, useMask } from '../components/HideTextToggle';
+import { Private, useHidden, useMask } from '../components/HideTextToggle';
 import { Kpi } from '../components/Kpi';
 import { rangeWords } from '../components/RangeControl';
 import { count, duration, money, plural, when } from '../format';
@@ -32,6 +32,7 @@ export function Prompts({ range, onRange, selected }: ViewProps) {
   const flagged = list.filter((p) => (p.multipleOfMedian ?? 0) >= FLAG_MEDIAN).length;
   const words = rangeWords(range);
   const mask = useMask();
+  const hidden = useHidden();
   const lede = !data ? 'Every prompt you sent, with what it cost.' : list.length === 0
     ? (needle ? `No prompts ${words} match “${mask(needle)}”.` : `No prompts ${words}.`)
     : <>{plural(list.length, 'prompt')}{needle ? ' match' : ''} {words}, <b className="num">{money(total)}</b> in all including the agents they launched.</>;
@@ -47,7 +48,7 @@ export function Prompts({ range, onRange, selected }: ViewProps) {
       </div>
       <div className="section">
         <div className="sec-h">
-          <input className="search" type="search" placeholder="Search prompt text" aria-label="Search prompt text"
+          <input className={`search${hidden ? ' masked-input' : ''}`} type="search" placeholder="Search prompt text" aria-label="Search prompt text"
             value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="mini-seg" role="group" aria-label="Order">
             <button type="button" aria-pressed={order === 'newest'} onClick={() => setOrder('newest')}>Newest</button>

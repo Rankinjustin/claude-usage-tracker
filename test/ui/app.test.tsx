@@ -174,7 +174,11 @@ describe('dashboard', () => {
     expect(FakeEventSource.instances.length).toBe(1);
     expect(FakeEventSource.instances[0]!.url).toBe('/api/events');
     act(() => FakeEventSource.instances[0]!.emit({ changed: ['s1'] }));
-    await waitFor(() => expect(calls('sessions').length).toBeGreaterThan(before));
+    act(() => FakeEventSource.instances[0]!.emit({ changed: ['s2'] }));
+    // Updates are coalesced: two events inside the window give one refetch, about a second later.
+    await waitFor(() => expect(calls('sessions').length).toBe(before + 1), { timeout: 3000 });
+    await new Promise((res) => setTimeout(res, 1200));
+    expect(calls('sessions').length).toBe(before + 1);
   });
 
   it('coverage badge shows partial sessions count', async () => {
@@ -188,12 +192,51 @@ describe('dashboard', () => {
     routes.overview = () => overviewData({ total: 0, prevTotal: 0, tokens: 0, calls: 0, sessions: 0, prompts: 0,
       daily: [], heat: [], parts: parts({}), takeaway: 'No usage recorded yet.' });
     routes.coverage = () => coverageData({ sessionsComplete: 0, installedAt: null,
-      backfillProgress: { done: 12, total: 40, startedAt: '2026-11-13T09:00:00.000Z' } });
+      backfillProgress: { done: 12, total: 40, startedAt: new Date().toISOString() } });
     window.location.hash = '#overview';
     render(<App />);
     const bar = await screen.findByRole('progressbar');
     expect(bar.getAttribute('aria-valuenow')).toBe('30');
     expect(screen.getByText(/12 of 40/)).toBeTruthy();
     expect(screen.queryByRole('img', { name: /Daily spend/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Month' })).toBeTruthy();
+  });
+
+  it('dead backfill does not lock the dashboard', async () => {
+    const intervals = vi.spyOn(window, 'setInterval');
+    routes.overview = () => overviewData({ total: 0, calls: 0, daily: [], heat: [], parts: parts({}),
+      takeaway: 'No usage in this period.' });
+    routes.coverage = () => coverageData({ backfillProgress: { done: 3, total: 40,
+      startedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() } });
+    window.location.hash = '#overview';
+    render(<App />);
+    expect(await screen.findByText(/No usage in this period\./)).toBeTruthy();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(screen.queryByText(/Reading your Claude Code history/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Month' })).toBeTruthy();
+    expect(intervals.mock.calls.some((c) => c[1] === 3000)).toBe(false);
+  });
+
+  it('range control stays usable during a backfill', async () => {
+    routes.coverage = () => coverageData({ backfillProgress: { done: 12, total: 40, startedAt: new Date().toISOString() } });
+    window.location.hash = '#overview';
+    render(<App />);
+    const bar = await screen.findByRole('progressbar');
+    expect(bar.getAttribute('aria-valuenow')).toBe('30');
+    expect(await screen.findByRole('img', { name: /Daily spend/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Month' }));
+    await waitFor(() => expect(calls('overview').some((u) => u.includes('range=month'))).toBe(true));
+  });
+
+  it('unmount closes the event stream and stops backfill polling', async () => {
+    const close = vi.spyOn(FakeEventSource.prototype, 'close');
+    const clear = vi.spyOn(window, 'clearInterval');
+    routes.coverage = () => coverageData({ backfillProgress: { done: 1, total: 40, startedAt: new Date().toISOString() } });
+    window.location.hash = '#overview';
+    const view = render(<App />);
+    await screen.findByRole('progressbar');
+    view.unmount();
+    expect(close).toHaveBeenCalled();
+    expect(clear).toHaveBeenCalled();
   });
 });
