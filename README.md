@@ -64,3 +64,7 @@ This keeps `~/.claude/token-tracker/` so your history survives. Delete that fold
 ## License
 
 MIT
+
+## Development
+
+Design, build plan, mockups and current status are in `docs/` — start with `docs/HANDOFF.md`.

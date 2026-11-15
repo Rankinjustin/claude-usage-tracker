@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dark theme options</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body { margin: 0; background: #2a2b2e; color: #eee; font: 14px/1.45 "Geist", system-ui, sans-serif; padding: 24px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.intro { color: #bbb; margin: 0 0 20px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }
+.opt { border-radius: 14px; overflow: hidden; cursor: pointer; outline: 2px solid transparent; transition: outline-color .15s; }
+.opt.selected { outline-color: #fff; }
+.cap { padding: 10px 14px; background: #1b1c1e; font-size: 13px; }
+.cap b { font-size: 14px; }
+.cap span { color: #aaa; display: block; }
+
+/* Each theme is just tokens on its container. */
+.th { background: var(--bg); color: var(--ink); padding: 14px; display: grid; grid-template-columns: 120px 1fr; gap: 12px; font-size: 12px; }
+.num { font-family: "Geist Mono", monospace; font-variant-numeric: tabular-nums; }
+.nav { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.nav div { padding: 5px 7px; border-radius: 6px; color: var(--ink-2); display: flex; justify-content: space-between; }
+.nav .on { background: var(--accent-soft); color: var(--accent-ink); font-weight: 500; }
+.nav .badge { background: var(--serious); color: #fff; border-radius: 8px; padding: 0 5px; font-size: 10px; }
+.col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tile { background: var(--surface); border: 1px solid var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); border-radius: 10px; padding: 10px 12px; }
+.tile .t { display: flex; justify-content: space-between; font-weight: 600; }
+.flag { color: var(--serious); background: var(--serious-soft); border-radius: 5px; padding: 0 6px; font-size: 10px; font-weight: 600; }
+.cost { font-size: 20px; font-weight: 600; margin: 4px 0 6px; }
+.spark { display: flex; align-items: flex-end; gap: 2px; height: 26px; }
+.spark i { flex: 1; background: var(--s1); border-radius: 2px 2px 0 0; }
+.spark i.hot { background: var(--serious); }
+.meta { color: var(--ink-2); margin-top: 6px; }
+.meta b { color: var(--ink); font-weight: 500; }
+.mix { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.mix .h { color: var(--ink-3); font-size: 11px; margin-bottom: 6px; }
+.bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; }
+.leg { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; color: var(--ink-2); font-size: 11px; }
+.leg i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+/* A. Graphite: neutral greys, no blue cast, softer accent. */
+.a { --bg:#141414; --surface:#1d1d1d; --line:#2c2c2c; --ink:#ededed; --ink-2:#a8a8a8; --ink-3:#6f6f6f;
+     --accent:#5b9cf0; --accent-soft:#1d2a3b; --accent-ink:#9cc3f6; --serious:#ec835a; --serious-soft:#382219;
+     --s1:#5b9cf0; --s2:#e07a4a; --s3:#2fb886; --s4:#d9a03a; --s5:#a08cf0; }
+/* B. Midnight: deep navy surfaces, brighter cyan-blue accent. */
+.b { --bg:#0b1020; --surface:#121a2e; --line:#1f2a44; --ink:#e8edf7; --ink-2:#9aa8c4; --ink-3:#5f6d8a;
+     --accent:#4cc2ff; --accent-soft:#11324a; --accent-ink:#8fd8ff; --serious:#ff8a5c; --serious-soft:#3a1f1a;
+     --s1:#4cc2ff; --s2:#ff8a5c; --s3:#3ddc97; --s4:#ffc857; --s5:#b49cff; }
+/* C. Warm charcoal: brown-black, amber accent. */
+.c { --bg:#171513; --surface:#211e1b; --line:#332f2a; --ink:#f1ece4; --ink-2:#b3aa9d; --ink-3:#7a7166;
+     --accent:#f0a640; --accent-soft:#3a2b14; --accent-ink:#f6c784; --serious:#ff6b5e; --serious-soft:#3d1c19;
+     --s1:#f0a640; --s2:#5fa8e8; --s3:#56c08f; --s4:#e46f8f; --s5:#b09cf0; }
+/* D. Slate + violet: cool grey with a violet accent. */
+.d { --bg:#111216; --surface:#191b21; --line:#282b34; --ink:#eceef3; --ink-2:#a2a7b4; --ink-3:#686d7a;
+     --accent:#8b7cf6; --accent-soft:#252041; --accent-ink:#b9afff; --serious:#f2875e; --serious-soft:#3a231a;
+     --s1:#8b7cf6; --s2:#f2875e; --s3:#34c38f; --s4:#e8b84a; --s5:#5aa9f0; }
+</style>
+</head>
+<body>
+<h1>Which dark theme do you like?</h1>
+<p class="intro">Same slice of the page in four palettes: sidebar, a selected tile with a flagged run, and the token-mix bar. Click one (or tell me what you'd change).</p>
+
+<div class="grid">
+  <!-- template repeated per theme -->
+  <div class="opt" data-choice="graphite" onclick="toggleSelect(this)">
+    <div class="th a">
+      <div class="nav"><div>Overview <span class="num">$137</span></div><div>Sessions</div><div class="on">Agents <span class="num">$38.7</span></div><div>Tools</div><div>Alerts <span class="badge">4</span></div></div>
+      <div class="col">
+        <div class="tile"><div class="t">general-purpose <span class="flag">▲ 1 run</span></div><div class="cost num">$31.11</div>
+          <div class="spark"><i style="height:20%"></i><i style="height:28%"></i><i style="height:16%"></i><i class="hot" style="height:100%"></i><i style="height:30%"></i><i style="height:22%"></i><i style="height:26%"></i></div>
+          <div class="meta"><b class="num">22</b> runs · <b class="num">$1.41</b>/run</div></div>
+        <div class="mix"><div class="h">TOKEN MIX</div><div class="bar"><i style="flex:32;background:var(--s1)"></i><i style="flex:30;background:var(--s3)"></i><i style="flex:13;background:var(--s2)"></i><i style="flex:10;background:var(--s4)"></i><i style="flex:9;background:var(--s5)"></i></div>
+          <div class="leg"><span><i style="background:var(--s1)"></i>cache read</span><span><i style="background:var(--s3)"></i>write 1h</span><span><i style="background:var(--s2)"></i>output</span><span><i style="background:var(--s4)"></i>write 5m</span><span><i style="background:var(--s5)"></i>advisor</span></div></div>
+      </div>
+    </div>
+    <div class="cap"><b>A. Graphite</b><span>True neutral greys, no blue tint. Calm, like VS Code's default dark.</span></div>
+  </div>
+
+  <div class="opt" data-choice="midnight" onclick="toggleSelect(this)">
+    <div class="th b">
+      <div class="nav"><div>Overview <span class="num">$137</span></div><div>Sessions</div><div class="on">Agents <span class="num">$38.7</span></div><div>Tools</div><div>Alerts <span class="badge">4</span></div></div>
+      <div class="col">
+        <div class="tile"><div class="t">general-purpose <span class="flag">▲ 1 run</span></div><div class="cost num">$31.11</div>
+          <div class="spark"><i style="height:20%"></i><i style="height:28%"></i><i style="height:16%"></i><i class="hot" style="height:100%"></i><i style="height:30%"></i><i style="height:22%"></i><i style="height:26%"></i></div>
+          <div class="meta"><b class="num">22</b> runs · <b class="num">$1.41</b>/run</div></div>
+        <div class="mix"><div class="h">TOKEN MIX</div><div class="bar"><i style="flex:32;background:var(--s1)"></i><i style="flex:30;background:var(--s3)"></i><i style="flex:13;background:var(--s2)"></i><i style="flex:10;background:var(--s4)"></i><i style="flex:9;background:var(--s5)"></i></div>
+          <div class="leg"><span><i style="background:var(--s1)"></i>cache read</span><span><i style="background:var(--s3)"></i>write 1h</span><span><i style="background:var(--s2)"></i>output</span><span><i style="background:var(--s4)"></i>write 5m</span><span><i style="background:var(--s5)"></i>advisor</span></div></div>
+      </div>
+    </div>
+    <div class="cap"><b>B. Midnight</b><span>Deep navy with a bright cyan accent. More "control room".</span></div>
+  </div>
+
+  <div class="opt" data-choice="warm" onclick="toggleSelect(this)">
+    <div class="th c">
+      <div class="nav"><div>Overview <span class="num">$137</span></div><div>Sessions</div><div class="on">Agents <span class="num">$38.7</span></div><div>Tools</div><div>Alerts <span class="badge">4</span></div></div>
+      <div class="col">
+        <div class="tile"><div class="t">general-purpose <span class="flag">▲ 1 run</span></div><div class="cost num">$31.11</div>
+          <div class="spark"><i style="height:20%"></i><i style="height:28%"></i><i style="height:16%"></i><i class="hot" style="height:100%"></i><i style="height:30%"></i><i style="height:22%"></i><i style="height:26%"></i></div>
+          <div class="meta"><b class="num">22</b> runs · <b class="num">$1.41</b>/run</div></div>
+        <div class="mix"><div class="h">TOKEN MIX</div><div class="bar"><i style="flex:32;background:var(--s1)"></i><i style="flex:30;background:var(--s2)"></i><i style="flex:13;background:var(--s3)"></i><i style="flex:10;background:var(--s4)"></i><i style="flex:9;background:var(--s5)"></i></div>
+          <div class="leg"><span><i style="background:var(--s1)"></i>cache read</span><span><i style="background:var(--s2)"></i>write 1h</span><span><i style="background:var(--s3)"></i>output</span><span><i style="background:var(--s4)"></i>write 5m</span><span><i style="background:var(--s5)"></i>advisor</span></div></div>
+      </div>
+    </div>
+    <div class="cap"><b>C. Warm charcoal</b><span>Brown-black with an amber accent. Softer on the eyes at night.</span></div>
+  </div>
+
+  <div class="opt" data-choice="violet" onclick="toggleSelect(this)">
+    <div class="th d">
+      <div class="nav"><div>Overview <span class="num">$137</span></div><div>Sessions</div><div class="on">Agents <span class="num">$38.7</span></div><div>Tools</div><div>Alerts <span class="badge">4</span></div></div>
+      <div class="col">
+        <div class="tile"><div class="t">general-purpose <span class="flag">▲ 1 run</span></div><div class="cost num">$31.11</div>
+          <div class="spark"><i style="height:20%"></i><i style="height:28%"></i><i style="height:16%"></i><i class="hot" style="height:100%"></i><i style="height:30%"></i><i style="height:22%"></i><i style="height:26%"></i></div>
+          <div class="meta"><b class="num">22</b> runs · <b class="num">$1.41</b>/run</div></div>
+        <div class="mix"><div class="h">TOKEN MIX</div><div class="bar"><i style="flex:32;background:var(--s1)"></i><i style="flex:30;background:var(--s3)"></i><i style="flex:13;background:var(--s2)"></i><i style="flex:10;background:var(--s4)"></i><i style="flex:9;background:var(--s5)"></i></div>
+          <div class="leg"><span><i style="background:var(--s1)"></i>cache read</span><span><i style="background:var(--s3)"></i>write 1h</span><span><i style="background:var(--s2)"></i>output</span><span><i style="background:var(--s4)"></i>write 5m</span><span><i style="background:var(--s5)"></i>advisor</span></div></div>
+      </div>
+    </div>
+    <div class="cap"><b>D. Slate + violet</b><span>Cool grey with a violet accent, a nod to Claude's own colors.</span></div>
+  </div>
+</div>
+</body>
+</html>

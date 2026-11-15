@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt detail mockup</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: breadcrumb header, summary strip, time breakdown, waterfall, then activity + spend side by side. */
+:root {
+  --bg:#f6f3ee; --surface:#fffdfa; --surface-2:#f0ebe3; --line:#e6dfd4; --line-strong:#d3c9ba;
+  --ink:#1d1a16; --ink-2:#5a5249; --ink-3:#8c8378;
+  --accent:#c27a12; --accent-soft:#fbefd9; --accent-ink:#8a560a;
+  --serious:#d4513f; --serious-soft:#fbe7e3; --good:#2f8a4c;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4; --s7:#6250d6;
+  --wait:#b9ae9f;
+  --sans:"Geist",system-ui,"Segoe UI",sans-serif; --mono:"Geist Mono",ui-monospace,Consolas,monospace;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg:#171513; --surface:#211e1b; --surface-2:#2a2622; --line:#332f2a; --line-strong:#463f37;
+  --ink:#f1ece4; --ink-2:#b3aa9d; --ink-3:#7a7166;
+  --accent:#f0a640; --accent-soft:#3a2b14; --accent-ink:#f6c784;
+  --serious:#ff6b5e; --serious-soft:#3d1c19; --good:#56c08f;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s7:#9085e9;
+  --wait:#5c544b; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 var(--sans); }
+.num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.wrap { max-width:1180px; margin:0 auto; padding:24px 28px 60px; display:flex; flex-direction:column; gap:18px; }
+.crumb { font-size:12px; color:var(--ink-3); display:flex; gap:6px; align-items:center; }
+.crumb a { color:var(--accent-ink); text-decoration:none; }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+.h { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); margin:0 0 12px; display:flex; justify-content:space-between; }
+.h span { text-transform:none; letter-spacing:0; font-weight:400; }
+
+.prompt { font-size:17px; line-height:1.5; margin:0; max-width:90ch; }
+.prompt::before { content:"“"; color:var(--accent); font-size:24px; line-height:0; margin-right:2px; vertical-align:-6px; }
+.pmeta { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:10px; font-size:12px; color:var(--ink-2); }
+.pill { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; border-radius:6px; padding:2px 8px; }
+.pill.warn { color:var(--serious); background:var(--serious-soft); }
+.pill.acc { color:var(--accent-ink); background:var(--accent-soft); }
+
+.strip { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.strip div { background:var(--surface); padding:12px 14px; }
+.strip .l { font-size:11px; color:var(--ink-3); font-weight:500; }
+.strip .v { font-size:20px; font-weight:600; letter-spacing:-.02em; margin-top:2px; }
+.strip .s { font-size:11px; color:var(--ink-2); }
+
+.tbar { display:flex; height:14px; border-radius:7px; overflow:hidden; gap:2px; }
+.tleg { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:8px 20px; margin-top:12px; font-size:12.5px; }
+.tleg div { display:flex; align-items:center; gap:8px; }
+.tleg i { width:10px; height:10px; border-radius:3px; flex:none; }
+.tleg b { margin-left:auto; font-weight:500; }
+.tleg em { font-style:normal; color:var(--ink-3); width:38px; text-align:right; }
+.hatch { background: repeating-linear-gradient(135deg, var(--wait) 0 3px, transparent 3px 6px); }
+
+/* Waterfall */
+.wf { display:grid; grid-template-columns:230px minmax(0,1fr); font-size:12px; }
+.wf .axis { grid-column:2; position:relative; height:18px; border-bottom:1px solid var(--line); }
+.wf .axis span { position:absolute; transform:translateX(-50%); font:10px var(--mono); color:var(--ink-3); }
+.wf .lbl { padding:7px 10px 7px 0; border-bottom:1px solid var(--line); display:flex; flex-direction:column; justify-content:center; min-width:0; }
+.wf .lbl b { font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.wf .lbl small { color:var(--ink-3); }
+.wf .lbl.child { padding-left:16px; border-left:2px solid var(--line-strong); }
+.wf .lane { position:relative; border-bottom:1px solid var(--line); min-height:38px; background-image:linear-gradient(to right, var(--line) 1px, transparent 1px); background-size:20% 100%; }
+.seg { position:absolute; top:11px; height:16px; border-radius:3px; cursor:pointer; }
+.seg:hover { outline:2px solid var(--ink); outline-offset:1px; z-index:2; }
+.seg.err { box-shadow:inset 0 -3px 0 var(--serious); }
+.mark { position:absolute; top:6px; bottom:6px; width:2px; background:var(--accent); }
+.mark::after { content:attr(data-l); position:absolute; top:-2px; left:5px; font:10px var(--mono); color:var(--accent-ink); white-space:nowrap; }
+.tip { position:absolute; left:47%; top:-58px; background:var(--surface-2); border:1px solid var(--line-strong); border-radius:8px; padding:7px 10px; font-size:11.5px; white-space:nowrap; box-shadow:0 6px 18px rgba(0,0,0,.25); z-index:3; }
+.tip b { font-weight:600; }
+
+.two { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr); gap:18px; }
+.phase { display:grid; grid-template-columns:52px 14px minmax(0,1fr); gap:0 10px; }
+.phase .t { font:11px var(--mono); color:var(--ink-3); padding-top:2px; text-align:right; }
+.phase .dot { position:relative; }
+.phase .dot::before { content:""; position:absolute; left:3px; top:6px; width:8px; height:8px; border-radius:50%; background:var(--accent); }
+.phase .dot::after { content:""; position:absolute; left:6.5px; top:16px; bottom:-4px; width:1px; background:var(--line-strong); }
+.phase:last-child .dot::after { display:none; }
+.phase .c { padding-bottom:14px; }
+.phase .c b { font-weight:600; }
+.phase .c p { margin:2px 0 0; color:var(--ink-2); font-size:12.5px; }
+.chips { display:flex; flex-wrap:wrap; gap:4px; margin-top:5px; }
+.chip { font:11px var(--mono); border:1px solid var(--line); border-radius:5px; padding:1px 6px; color:var(--ink-2); }
+.chip.e { color:var(--serious); border-color:var(--serious-soft); background:var(--serious-soft); }
+
+table { width:100%; border-collapse:collapse; font-size:12.5px; }
+th { text-align:left; font-weight:500; color:var(--ink-3); font-size:11px; padding:0 0 6px; border-bottom:1px solid var(--line); }
+td { padding:7px 0; border-bottom:1px solid var(--line); }
+.r { text-align:right; }
+.minibar { height:6px; border-radius:3px; background:var(--surface-2); overflow:hidden; width:80px; display:inline-block; vertical-align:middle; margin-right:6px; }
+.minibar i { display:block; height:100%; }
+.files { columns:2; column-gap:18px; font:12px var(--mono); color:var(--ink-2); margin:0; padding:0; list-style:none; }
+.files li { break-inside:avoid; padding:2px 0; display:flex; justify-content:space-between; gap:8px; }
+.files .a { color:var(--good); } .files .d { color:var(--serious); }
+.note { font-size:11px; color:var(--ink-3); }
+.toggle { position:fixed; right:14px; bottom:14px; display:flex; gap:4px; background:var(--surface); border:1px solid var(--line); border-radius:9px; padding:3px; }
+.toggle button { border:0; background:none; color:var(--ink); font:500 12px var(--sans); padding:5px 10px; cursor:pointer; }
+</style>
+</head>
+<body>
+<div class="toggle"><button onclick="document.documentElement.dataset.theme='dark'">Dark</button><button onclick="document.documentElement.dataset.theme='light'">Light</button></div>
+<div class="wrap">
+
+  <div class="crumb"><a href="#">Sessions</a> › <a href="#">Storefront and inventory review</a> › Prompt 14 of 31</div>
+
+  <div class="card">
+    <p class="prompt">Can you perform a code review on my storefront app and my inventory service for any bugs, security issues or things that could be simplified?</p>
+    <div class="pmeta">
+      <span class="num">Nov 12 · 2:27 PM</span><span>opus-5-5 · medium effort</span><span>branch main</span>
+      <span class="pill warn">▲ 4.1× your median prompt cost</span><span class="pill acc">2 subagents · 1 skill</span>
+    </div>
+  </div>
+
+  <div class="strip">
+    <div><div class="l">Total cost</div><div class="v num">$7.27</div><div class="s">$1.41 main · $5.86 agents</div></div>
+    <div><div class="l">Wall time</div><div class="v num">41m 12s</div><div class="s">until Claude finished</div></div>
+    <div><div class="l">Tokens</div><div class="v num">9.8M</div><div class="s">94% cache reads</div></div>
+    <div><div class="l">API calls</div><div class="v num">49</div><div class="s">+ 2 advisor calls</div></div>
+    <div><div class="l">Tool calls</div><div class="v num">112</div><div class="s" style="color:var(--serious)">6 failed · 1 denied</div></div>
+    <div><div class="l">Code changed</div><div class="v num">+214 −38</div><div class="s">9 files</div></div>
+  </div>
+
+  <div class="card">
+    <div class="h">Where the 41 minutes went <span>agents run in parallel, so their time overlaps the main thread</span></div>
+    <div class="tbar">
+      <i style="flex:31;background:var(--s1)"></i><i style="flex:22;background:var(--s3)"></i><i style="flex:18;background:var(--s2)"></i><i style="flex:9;background:var(--s4)"></i><i style="flex:6;background:var(--s7)"></i><i class="hatch" style="flex:11"></i><i style="flex:3;background:var(--s5)"></i>
+    </div>
+    <div class="tleg">
+      <div><i style="background:var(--s1)"></i>Model thinking &amp; writing<b class="num">12m 46s</b><em class="num">31%</em></div>
+      <div><i style="background:var(--s3)"></i>Bash (tests, builds)<b class="num">9m 04s</b><em class="num">22%</em></div>
+      <div><i style="background:var(--s2)"></i>Waiting on subagents<b class="num">7m 25s</b><em class="num">18%</em></div>
+      <div><i style="background:var(--s4)"></i>Read / Grep / Glob<b class="num">3m 42s</b><em class="num">9%</em></div>
+      <div><i style="background:var(--s7)"></i>Skill: code-review<b class="num">2m 28s</b><em class="num">6%</em></div>
+      <div><i class="hatch"></i>Waiting for your approval<b class="num">4m 32s</b><em class="num">11%</em></div>
+      <div><i style="background:var(--s5)"></i>Hooks &amp; compaction<b class="num">1m 15s</b><em class="num">3%</em></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="h">Timeline <span>hover a bar for its call · click to open it</span></div>
+    <div class="wf">
+      <div class="lbl" style="border:0"></div>
+      <div class="axis"><span style="left:0%">0m</span><span style="left:20%">8m</span><span style="left:40%">16m</span><span style="left:60%">25m</span><span style="left:80%">33m</span><span style="left:99%">41m</span></div>
+
+      <div class="lbl"><b>Main thread</b><small>31 calls · $1.41</small></div>
+      <div class="lane">
+        <div class="seg" style="left:0%;width:4%;background:var(--s1)"></div>
+        <div class="seg" style="left:4.5%;width:6%;background:var(--s4)"></div>
+        <div class="seg" style="left:11%;width:5%;background:var(--s7)"></div>
+        <div class="seg hatch" style="left:16.5%;width:11%"></div>
+        <div class="mark" style="left:28%" data-l="2 agents"></div>
+        <div class="seg" style="left:28.5%;width:3%;background:var(--s1)"></div>
+        <div class="seg" style="left:32%;width:18%;background:var(--s2);opacity:.45"></div>
+        <div class="seg" style="left:50.5%;width:9%;background:var(--s3)"></div>
+        <div class="seg err" style="left:60%;width:5%;background:var(--s3)"></div>
+        <div class="seg" style="left:65.5%;width:3%;background:var(--s5)"></div>
+        <div class="seg" style="left:69%;width:24%;background:var(--s1)"></div>
+        <div class="seg" style="left:93.5%;width:6%;background:var(--s4)"></div>
+      </div>
+
+      <div class="lbl child"><b>general-purpose · “Review storefront app”</b><small>11 calls · $3.12 · 17m</small></div>
+      <div class="lane">
+        <div class="seg" style="left:28.5%;width:3%;background:var(--s1)"></div>
+        <div class="seg" style="left:32%;width:8%;background:var(--s4)"></div>
+        <div class="seg" style="left:40.5%;width:6%;background:var(--s3)">
+          <div class="tip"><b>Bash</b> · npm test · 2m 31s<br><span class="num">exit 0 · 4.1K tokens into context · $0.04</span></div>
+        </div>
+        <div class="seg" style="left:47%;width:3%;background:var(--s1)"></div>
+      </div>
+
+      <div class="lbl child"><b>general-purpose · “Review inventory service”</b><small>7 calls · $2.74 · 15m</small></div>
+      <div class="lane">
+        <div class="seg" style="left:28.5%;width:2%;background:var(--s1)"></div>
+        <div class="seg" style="left:31%;width:10%;background:var(--s4)"></div>
+        <div class="seg err" style="left:41.5%;width:4%;background:var(--s3)"></div>
+        <div class="seg" style="left:46%;width:3.5%;background:var(--s1)"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="two">
+    <div class="card">
+      <div class="h">What it was doing <span>grouped from the tools it called</span></div>
+      <div class="phase"><div class="t">0:00</div><div class="dot"></div><div class="c"><b>Read the two apps</b><p>Listed both repos, read entry points and package files.</p><div class="chips"><span class="chip">Glob ×4</span><span class="chip">Read ×18</span><span class="chip">Grep ×7</span></div></div></div>
+      <div class="phase"><div class="t">4:30</div><div class="dot"></div><div class="c"><b>Loaded the code-review skill</b><p>Skill instructions added 6.2K tokens to context.</p><div class="chips"><span class="chip">Skill: code-review</span></div></div></div>
+      <div class="phase"><div class="t">6:50</div><div class="dot"></div><div class="c"><b>Waited for you</b><p>Permission prompt for <span class="num">npm audit</span>; approved after 4m 32s.</p></div></div>
+      <div class="phase"><div class="t">11:30</div><div class="dot"></div><div class="c"><b>Spawned two reviewer agents</b><p>One per app, in parallel. They read 61 files and ran each test suite.</p><div class="chips"><span class="chip">Agent ×2</span><span class="chip">Read ×43</span><span class="chip">Bash ×9</span><span class="chip e">Bash failed ×3</span></div></div></div>
+      <div class="phase"><div class="t">20:40</div><div class="dot"></div><div class="c"><b>Fixed and re-ran tests</b><p>Edited 9 files; first test run failed on a type error, second passed.</p><div class="chips"><span class="chip">Edit ×14</span><span class="chip">Bash ×6</span><span class="chip e">npx vitest exit 1</span></div></div></div>
+      <div class="phase"><div class="t">28:20</div><div class="dot"></div><div class="c"><b>Wrote the review summary</b><p>Long final answer: 3.1K output tokens.</p></div></div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:18px">
+      <div class="card">
+        <div class="h">What it cost, by part</div>
+        <table>
+          <tr><th>Part</th><th>Share</th><th class="r">Cost</th></tr>
+          <tr><td>Reviewer · storefront</td><td><span class="minibar"><i style="width:43%;background:var(--s2)"></i></span></td><td class="r num">$3.12</td></tr>
+          <tr><td>Reviewer · inventory</td><td><span class="minibar"><i style="width:38%;background:var(--s2)"></i></span></td><td class="r num">$2.74</td></tr>
+          <tr><td>Main thread</td><td><span class="minibar"><i style="width:19%;background:var(--s1)"></i></span></td><td class="r num">$1.41</td></tr>
+        </table>
+        <table style="margin-top:12px">
+          <tr><th>Token type</th><th class="r">Tokens</th><th class="r">Cost</th></tr>
+          <tr><td>Cache read</td><td class="r num">9.2M</td><td class="r num">$1.84</td></tr>
+          <tr><td>Cache write 1h</td><td class="r num">412K</td><td class="r num">$3.30</td></tr>
+          <tr><td>Output + thinking</td><td class="r num">101K</td><td class="r num">$2.02</td></tr>
+          <tr><td>Advisor</td><td class="r num">24K</td><td class="r num">$0.11</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <div class="h">Files touched <span>9 edited · 61 read</span></div>
+        <ul class="files">
+          <li>storefront/src/roster.ts<span><span class="a">+82</span> <span class="d">−9</span></span></li>
+          <li>storefront/src/api.ts<span><span class="a">+41</span> <span class="d">−12</span></span></li>
+          <li>inventory/lib/draft.ts<span><span class="a">+36</span> <span class="d">−6</span></span></li>
+          <li>inventory/lib/auth.ts<span><span class="a">+22</span> <span class="d">−4</span></span></li>
+          <li>storefront/src/db.ts<span><span class="a">+14</span> <span class="d">−3</span></span></li>
+          <li>… 4 more</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <p class="note">Mockup: the prompt, its total cost, the agent count and the session are real; the timings, phases and files are illustrative of what the plugin will record.</p>
+</div>
+</body>
+</html>
